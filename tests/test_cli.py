@@ -251,6 +251,103 @@ def test_ws_delete_force_passes_flag_through(mock_delete):
     assert "Deleted workspace 1 (now managing 1 workspace)" in result.stdout
 
 
+# --- ws organize --------------------------------------------------------------
+
+
+def _organize_config():
+    return _config(
+        [
+            WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
+            WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
+        ]
+    )
+
+
+@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_count", return_value=1)
+@patch("et.cli.load_config")
+def test_ws_organize_reports_nothing_to_organize(mock_load_config, _mock_count, _mock_timers):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-A")])
+
+    result = runner.invoke(app, ["ws", "organize"])
+
+    assert result.exit_code == 0
+    assert "Nothing to organize" in result.stdout
+
+
+@patch("et.cli.open_in_editor")
+@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_count", return_value=2)
+@patch("et.cli.load_config")
+def test_ws_organize_reports_no_changes(mock_load_config, _mock_count, _mock_timers, mock_editor):
+    mock_load_config.return_value = _organize_config()
+    mock_editor.return_value = "1\n2\n"
+
+    result = runner.invoke(app, ["ws", "organize"])
+
+    assert result.exit_code == 0
+    assert "No changes." in result.stdout
+
+
+@patch("et.cli.apply_organize_plan")
+@patch("et.cli.open_in_editor")
+@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_count", return_value=2)
+@patch("et.cli.load_config")
+def test_ws_organize_shows_summary_and_aborts_on_decline(
+    mock_load_config, _mock_count, _mock_timers, mock_editor, mock_apply
+):
+    mock_load_config.return_value = _organize_config()
+    mock_editor.return_value = "2\n1\n"
+
+    result = runner.invoke(app, ["ws", "organize"], input="n\n")
+
+    assert result.exit_code == 0
+    assert "Proposed workspace order:" in result.stdout
+    assert "ISD-A" in result.stdout
+    assert "ISD-B" in result.stdout
+    assert "Aborted." in result.stdout
+    mock_apply.assert_not_called()
+
+
+@patch("et.cli.apply_organize_plan")
+@patch("et.cli.open_in_editor")
+@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_count", return_value=2)
+@patch("et.cli.load_config")
+def test_ws_organize_applies_on_confirm(
+    mock_load_config, _mock_count, _mock_timers, mock_editor, mock_apply
+):
+    mock_load_config.return_value = _organize_config()
+    mock_editor.return_value = "2\n1\n"
+
+    result = runner.invoke(app, ["ws", "organize"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "Reorganized 2 workspaces." in result.stdout
+    mock_apply.assert_called_once()
+    plan = mock_apply.call_args[0][3]
+    by_new_slot = {row.new_slot: row for row in plan}
+    assert by_new_slot[0].entry.name == "ISD-B"
+    assert by_new_slot[1].entry.name == "ISD-A"
+
+
+@patch("et.cli.open_in_editor")
+@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_count", return_value=2)
+@patch("et.cli.load_config")
+def test_ws_organize_reports_invalid_editor_result(
+    mock_load_config, _mock_count, _mock_timers, mock_editor
+):
+    mock_load_config.return_value = _organize_config()
+    mock_editor.return_value = "1\n1\n"
+
+    result = runner.invoke(app, ["ws", "organize"])
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+
+
 # --- static-workspace startup check ------------------------------------------
 
 
