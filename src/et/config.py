@@ -37,6 +37,8 @@ class JiraConfig:
     pat: str
     jql: str
     priority_order: list[str] = field(default_factory=lambda: list(DEFAULT_PRIORITY_ORDER))
+    project_key: str | None = None
+    board_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,12 +93,22 @@ def _parse_jira_block(raw_jira: object, path: Path) -> JiraConfig | None:
     ):
         raise ConfigError(f"config file {path}: jira.priority_order must be a list of strings")
 
+    project_key = raw_jira.get("project_key")
+    if project_key is not None and not isinstance(project_key, str):
+        raise ConfigError(f"config file {path}: jira.project_key must be a string")
+
+    board_id = raw_jira.get("board_id")
+    if board_id is not None and not isinstance(board_id, str):
+        raise ConfigError(f"config file {path}: jira.board_id must be a string")
+
     return JiraConfig(
         base_url=required["base_url"],
         email=required["email"],
         pat=required["pat"],
         jql=required["jql"],
         priority_order=list(priority_order),
+        project_key=project_key,
+        board_id=board_id,
     )
 
 
@@ -181,13 +193,18 @@ def save_config(config: EtConfig) -> None:
     data: dict[str, object] = {}
 
     if config.jira is not None:
-        data["jira"] = {
+        jira_data: dict[str, object] = {
             "base_url": config.jira.base_url,
             "email": config.jira.email,
             "pat": config.jira.pat,
             "jql": config.jira.jql,
             "priority_order": list(config.jira.priority_order),
         }
+        if config.jira.project_key is not None:
+            jira_data["project_key"] = config.jira.project_key
+        if config.jira.board_id is not None:
+            jira_data["board_id"] = config.jira.board_id
+        data["jira"] = jira_data
 
     workspaces_data: list[dict[str, object]] = []
     for entry in config.workspaces:

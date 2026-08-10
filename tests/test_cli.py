@@ -384,16 +384,63 @@ def test_jira_start_does_not_transition_when_declined(mock_create_from_jira):
     assert captured["confirmed"] is False
 
 
+@patch("et.cli.create_task_from_jira")
+def test_jira_start_defaults_transition_prompt_to_yes(mock_create_from_jira):
+    captured = {}
+
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+        del confirm_grow
+        del select_issue
+        issue = JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="To Do")
+        captured["confirmed"] = confirm_transition(issue)
+        return None
+
+    mock_create_from_jira.side_effect = fake_create_from_jira
+
+    result = runner.invoke(app, ["jira", "start"], input="\n")
+
+    assert result.exit_code == 0
+    assert "[Y/n]" in result.stdout
+    assert captured["confirmed"] is True
+
+
+@patch("et.cli.create_task_from_jira")
+def test_jira_start_defaults_grow_prompt_to_yes(mock_create_from_jira):
+    captured = {}
+
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+        del confirm_transition
+        del select_issue
+        captured["confirmed"] = confirm_grow(4)
+        return None
+
+    mock_create_from_jira.side_effect = fake_create_from_jira
+
+    result = runner.invoke(app, ["jira", "start"], input="\n")
+
+    assert result.exit_code == 0
+    assert "All 4 workspaces are in use. Add another workspace? [Y/n]" in result.stdout
+    assert captured["confirmed"] is True
+
+
+@patch("et.cli._hyperlink", side_effect=lambda text, url: f"<{url}|{text}>")
+@patch("et.cli.load_config")
 @patch("et.cli.log_time_for_current_workspace")
-def test_jira_log_time_logs_and_reports_duration(mock_log_time):
+def test_jira_log_time_logs_and_reports_duration(mock_log_time, mock_load_config, mock_hyperlink):
     mock_log_time.return_value = LogTimeResult(
         workspace_index=1, issue_key="ISD-321", seconds_logged=4320, tracker_reset=True
     )
+    mock_load_config.return_value = _config([])
 
     result = runner.invoke(app, ["jira", "log-time", "--comment", "note"])
 
     assert result.exit_code == 0
-    assert "Logged 1h 12m 0s to jira:ISD-321 (workspace 2)" in result.stdout
+    mock_hyperlink.assert_called_once_with(
+        "jira:ISD-321", "https://example.atlassian.net/browse/ISD-321"
+    )
+    assert "Logged 1h 12m 0s to <https://example.atlassian.net/browse/ISD-321|jira:ISD-321>" in (
+        result.stdout
+    )
     mock_log_time.assert_called_once_with(description="note", reset=True)
 
 
@@ -412,15 +459,49 @@ def test_jira_complete_logs_time_and_frees_workspace(mock_complete):
 
     mock_complete.side_effect = fake_complete
 
-    result = runner.invoke(
-        app, ["jira", "complete", "--comment", "wrapping up"], input="y\ny\n"
-    )
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(
+            app, ["jira", "complete", "--comment", "wrapping up"], input="y\ny\n"
+        )
 
     assert result.exit_code == 0
     assert mock_complete.call_args.kwargs["comment"] == "wrapping up"
     assert "Logged 0h 13m 0s to jira:ISD-321 (workspace 2)" in result.stdout
     assert "Deleted workspace 2" in result.stdout
     assert "Moved ISD-321 to 'Done'" in result.stdout
+
+
+@patch("et.cli._hyperlink", side_effect=lambda text, url: f"<{url}|{text}>")
+@patch("et.cli.load_config")
+@patch("et.cli.complete_task_for_current_workspace")
+def test_jira_complete_uses_hyperlink_helper_for_issue_key(
+    mock_complete, mock_load_config, mock_hyperlink
+):
+    mock_load_config.return_value = _config([])
+
+    def fake_complete(comment, on_logged, confirm_delete, confirm_done):
+        log_result = LogTimeResult(
+            workspace_index=1, issue_key="ISD-321", seconds_logged=780, tracker_reset=True
+        )
+        on_logged(log_result)
+        freed = confirm_delete(log_result)
+        done = confirm_done(log_result)
+        return TaskCompleteResult(
+            log_result=log_result, workspace_freed=freed, moved_to_done=done
+        )
+
+    mock_complete.side_effect = fake_complete
+
+    result = runner.invoke(app, ["jira", "complete"], input="y\ny\n")
+
+    assert result.exit_code == 0
+    assert "<https://example.atlassian.net/browse/ISD-321|jira:ISD-321>" in result.stdout
+    assert "Move <https://example.atlassian.net/browse/ISD-321|ISD-321> to 'Done'?" in (
+        result.stdout
+    )
+    assert "Moved <https://example.atlassian.net/browse/ISD-321|ISD-321> to 'Done'" in (
+        result.stdout
+    )
 
 
 @patch("et.cli.complete_task_for_current_workspace")
@@ -455,3 +536,175 @@ def test_jira_complete_reports_error(mock_complete):
     assert result.exit_code == 1
     assert "Error: no Jira issue linked to workspace 1" in result.output
 
+
+
+@patch("et.cli.create_issue_interactive")
+def test_jira_create_reports_created_issue(mock_create):
+    from et.jira_create import JiraCreateResult
+
+    mock_create.return_value = JiraCreateResult(
+        key="PROJ-42", url="https://example.atlassian.net/browse/PROJ-42"
+    )
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "create"])
+
+    assert result.exit_code == 0
+    assert "Created PROJ-42" in result.stdout
+    args, _kwargs = mock_create.call_args
+    assert args[1] is None
+
+
+@patch("et.cli.create_issue_interactive")
+def test_jira_create_forwards_github_url(mock_create):
+    from et.jira_create import JiraCreateResult
+
+    mock_create.return_value = JiraCreateResult(
+        key="PROJ-43", url="https://example.atlassian.net/browse/PROJ-43"
+    )
+    github_url = "https://github.com/canonical/wazuh-server-operator/issues/263"
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "create", github_url])
+
+    assert result.exit_code == 0
+    args, _kwargs = mock_create.call_args
+    assert args[1] == github_url
+
+
+@patch("et.cli.create_issue_interactive")
+def test_jira_create_reports_error(mock_create):
+    from et.jira_create import JiraCreateError
+
+    mock_create.side_effect = JiraCreateError("no 'jira.project_key' set in the config file")
+
+    result = runner.invoke(app, ["jira", "create"])
+
+    assert result.exit_code == 1
+    assert "Error: no 'jira.project_key' set" in result.output
+
+
+@patch("et.cli.create_issue_interactive")
+def test_jira_create_prompt_type_defaults_to_story(mock_create):
+    from et.jira_create import JiraCreateResult
+
+    def fake_create(prompts, github_url):
+        del github_url
+        assert prompts.prompt_type("Story") == "Story"
+        return JiraCreateResult(key="PROJ-44", url="https://example.atlassian.net/browse/PROJ-44")
+
+    mock_create.side_effect = fake_create
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "create"], input="\n")
+
+    assert result.exit_code == 0
+
+
+def test_prompt_component_lists_components_and_returns_none_for_zero():
+    from et.cli import _prompt_component
+    from et.jira import JiraComponent
+
+    components = [JiraComponent(id="1", name="Backend"), JiraComponent(id="2", name="Frontend")]
+
+    with patch("et.cli.typer.prompt", return_value="0"):
+        assert _prompt_component(components) is None
+
+
+def test_prompt_component_returns_selected_component():
+    from et.cli import _prompt_component
+    from et.jira import JiraComponent
+
+    components = [JiraComponent(id="1", name="Backend"), JiraComponent(id="2", name="Frontend")]
+
+    with patch("et.cli.typer.prompt", return_value="2"):
+        assert _prompt_component(components) == components[1]
+
+
+def test_prompt_from_list_shows_numbered_options_and_marks_default():
+    from et.cli import _prompt_from_list
+
+    with patch("et.cli.typer.prompt", return_value="1") as mock_prompt:
+        result = _prompt_from_list("Priority", ("Highest", "High", "Medium"), "High")
+
+    assert result == "Highest"
+    mock_prompt.assert_called_once_with("Pick a number", default="2")
+
+
+def test_prompt_from_list_falls_back_to_default_on_invalid_input():
+    from et.cli import _prompt_from_list
+
+    with patch("et.cli.typer.prompt", return_value="99"):
+        result = _prompt_from_list("Priority", ("Highest", "High", "Medium"), "High")
+
+    assert result == "High"
+
+
+def test_prompt_component_shows_three_columns(capsys):
+    from et.cli import _prompt_component
+    from et.jira import JiraComponent
+
+    components = [
+        JiraComponent(id="1", name="Backend"),
+        JiraComponent(id="2", name="Frontend"),
+        JiraComponent(id="3", name="Docs"),
+        JiraComponent(id="4", name="Infra"),
+    ]
+
+    with patch("et.cli.typer.prompt", return_value="0"):
+        _prompt_component(components)
+
+    lines = capsys.readouterr().out.splitlines()
+    # "0. (none)", "1. Backend", "2. Frontend" all fit on the first row (3 columns).
+    first_row = next(line for line in lines if "0. (none)" in line)
+    assert "1. Backend" in first_row
+    assert "2. Frontend" in first_row
+
+
+@patch("et.cli.create_issue_interactive")
+def test_jira_create_returns_cancelled_when_confirm_declined(mock_create):
+    def fake_create(prompts, github_url):
+        del github_url
+        assert prompts.confirm_create([("Summary", "Fix the bug")]) is False
+        return None
+
+    with patch("et.cli.typer.confirm", return_value=False):
+        mock_create.side_effect = fake_create
+        result = runner.invoke(app, ["jira", "create"])
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.stdout
+
+
+@patch("et.cli.create_issue_interactive")
+def test_jira_create_confirm_prints_summary_fields(mock_create):
+    from et.jira_create import JiraCreateResult
+
+    def fake_create(prompts, github_url):
+        del github_url
+        prompts.confirm_create([("Summary", "Fix the bug"), ("Priority", "Medium")])
+        return JiraCreateResult(key="PROJ-50", url="https://example.atlassian.net/browse/PROJ-50")
+
+    mock_create.side_effect = fake_create
+
+    with patch("et.cli.typer.confirm", return_value=True):
+        result = runner.invoke(app, ["jira", "create"])
+
+    assert result.exit_code == 0
+    assert "About to create this issue:" in result.stdout
+    assert "Summary: Fix the bug" in result.stdout
+    assert "Priority: Medium" in result.stdout
+
+
+@patch("et.cli.create_issue_interactive")
+def test_jira_create_reports_no_board_configured_error(mock_create):
+    from et.jira_create import JiraCreateError
+
+    mock_create.side_effect = JiraCreateError(
+        "no Jira Agile board configured or discoverable for project 'PROJ'"
+    )
+
+    result = runner.invoke(app, ["jira", "create"])
+
+    assert result.exit_code == 1
+    assert "Error: no Jira Agile board configured" in result.output

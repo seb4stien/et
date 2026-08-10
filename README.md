@@ -13,11 +13,13 @@ log time against them.
   this help.
 - **`et ws rename`** — rename the active workspace (or all of them from config).
 - **`et ws delete`** — delete the active (free) workspace, shifting later ones left.
-- **`et jira [start|log-time|complete]`** — a friendlier, task-centric
+- **`et jira [start|create|log-time|complete]`** — a friendlier, task-centric
   layer that creates a workspace + Tracker timer for a task (picked
   straight from your active Jira issues, optionally moving it to "In
-  Progress"), and completes it by logging its tracked time to Jira and
-  optionally freeing the slot and moving the issue to "Done".
+  Progress"), interactively creates new Jira issues (optionally pre-filled
+  from a GitHub issue/PR URL), and completes a task by logging its tracked
+  time to Jira and optionally freeing the slot and moving the issue to
+  "Done".
 
 ## Requirements
 
@@ -32,6 +34,8 @@ log time against them.
   — reload the Tracker extension around timer writes.
 - The **Tracker** GNOME Shell extension (`tracker@aliakseiz.github.com`),
   installed and enabled, for `et jira`'s timer functionality.
+- [`gh`](https://cli.github.com/) — installed and authenticated, only
+  needed for `et jira create <GITHUB_URL>`'s summary/description prefill.
 
 Python **3.12+** is required.
 
@@ -121,6 +125,7 @@ working exactly as before.
 ```bash
 et info                                      # (or bare `et`) show the active task's Jira issue and time spent
 et jira start                                # pick an active Jira issue and start a task from it
+et jira create                               # interactively create a new Jira issue
 et jira log-time                             # log the active workspace's tracked time to Jira
 et jira complete                             # log time, then optionally delete the workspace and close the issue
 ```
@@ -147,6 +152,29 @@ workspace to it. If the selected issue isn't already "In Progress", it
 asks whether to
 move it there (showing its current status) and does so via Jira's
 transitions API if you confirm.
+
+`et jira create [GITHUB_URL]` interactively creates a new Jira issue in
+`jira.project_key` (required in config for this command). It prompts for:
+the issue type (`Bug`/`Story`/`Task`, default `Story` — defaulting to `Bug`
+when `GITHUB_URL` points at a GitHub issue labeled "bug"); the summary
+(pre-filled from the GitHub issue/PR title when a URL is given); whether to
+assign the issue to yourself (default yes, via your `jira.email`); priority
+(`Highest`/`High`/`Medium`/`Low`/`Lowest`, default `Medium`); a component
+picked from the project's component list; whether to add the issue to the
+project's current sprint (default yes — the Agile board is auto-discovered
+on first use and its id saved to `jira.board_id` so later runs skip that
+lookup); an estimate in hours (written to the issue's time-tracking
+original estimate); and an optional description (pre-filled from the
+GitHub issue/PR body when a URL is given, with the URL itself always
+appended as a reference). When `GITHUB_URL` is given, it's also written to
+the issue's "Bug link" field, if that custom field exists on the Jira
+instance (looked up by name, like the Sprint field — skipped with a
+warning otherwise). `GITHUB_URL` accepts
+`https://github.com/<owner>/<repo>/issues/<n>` and
+`https://github.com/<owner>/<repo>/pull/<n>` links, fetched via the `gh`
+CLI (which must be installed and authenticated) — if the URL can't be
+parsed or fetched, `et jira create` warns and falls back to blank
+defaults rather than failing outright.
 
 `et jira log-time` reads the elapsed time from the `ET-<n>` Tracker timer
 bound to the active workspace, resolves the Jira issue linked to that
@@ -175,7 +203,8 @@ left in the middle of your workspaces. If only a single workspace remains
 
 ```yaml
 # Jira Cloud REST credentials + query. Required for `et jira start`
-# (Jira-issue picking), `et jira log-time`, and `et jira complete`.
+# (Jira-issue picking), `et jira log-time`, `et jira complete`, and
+# `et jira create`.
 jira:
   base_url: https://your-org.atlassian.net
   email: you@example.com
@@ -183,6 +212,11 @@ jira:
   jql: assignee = currentUser() AND statusCategory != Done
   # Optional; controls sort order. Defaults to the list below.
   priority_order: [Highest, High, Medium, Low, Lowest]
+  # Required only for `et jira create`: the project new issues are filed in.
+  project_key: ISD
+  # Optional; the Agile board id used by `et jira create` to find the
+  # current sprint. Auto-discovered and saved here on first use if absent.
+  board_id: "42"
 
 # Ordered workspace list used by `ws rename --all` and `et jira start`.
 workspaces:

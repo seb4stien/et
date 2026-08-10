@@ -9,11 +9,21 @@ import requests
 
 from et.config import JiraConfig
 from et.jira import (
+    JiraComponent,
     JiraError,
     JiraIssue,
+    JiraSprint,
+    create_issue,
     create_worklog,
+    discover_board_id,
     fetch_active_issues,
+    fetch_active_sprint,
+    fetch_bug_link_field_id,
+    fetch_components,
+    fetch_sprint_field_id,
     fetch_transitions,
+    search_user_account_id,
+    text_to_adf,
     transition_issue,
 )
 
@@ -318,3 +328,189 @@ def test_transition_issue_wraps_network_errors(mock_post):
         transition_issue(_config(), "PROJ-1", "11")
 
 
+
+
+def test_text_to_adf_splits_paragraphs_on_blank_lines():
+    doc = text_to_adf("first paragraph\n\nsecond paragraph")
+
+    assert doc == {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "first paragraph"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "second paragraph"}]},
+        ],
+    }
+
+
+@patch("et.jira.requests.get")
+def test_search_user_account_id_returns_first_match(mock_get):
+    mock_get.return_value = _json_response(200, [{"accountId": "abc123"}])
+
+    account_id = search_user_account_id(_config(), "me@example.com")
+
+    assert account_id == "abc123"
+    args, kwargs = mock_get.call_args
+    assert kwargs["params"] == {"query": "me@example.com"}
+
+
+@patch("et.jira.requests.get")
+def test_search_user_account_id_returns_none_when_no_match(mock_get):
+    mock_get.return_value = _json_response(200, [])
+
+    assert search_user_account_id(_config(), "nobody@example.com") is None
+
+
+@patch("et.jira.requests.get")
+def test_fetch_components_parses_id_and_name(mock_get):
+    mock_get.return_value = _json_response(
+        200, [{"id": "10000", "name": "Backend"}, {"id": "10001", "name": "Frontend"}]
+    )
+
+    components = fetch_components(_config(), "PROJ")
+
+    assert components == [
+        JiraComponent(id="10000", name="Backend"),
+        JiraComponent(id="10001", name="Frontend"),
+    ]
+    args, _kwargs = mock_get.call_args
+    assert args[0] == "https://example.atlassian.net/rest/api/3/project/PROJ/components"
+
+
+@patch("et.jira.requests.get")
+def test_discover_board_id_returns_first_board(mock_get):
+    mock_get.return_value = _json_response(200, {"values": [{"id": 42}, {"id": 43}]})
+
+    board_id = discover_board_id(_config(), "PROJ")
+
+    assert board_id == "42"
+
+
+@patch("et.jira.requests.get")
+def test_discover_board_id_returns_none_when_no_boards(mock_get):
+    mock_get.return_value = _json_response(200, {"values": []})
+
+    assert discover_board_id(_config(), "PROJ") is None
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_sprint_returns_first_active_sprint(mock_get):
+    mock_get.return_value = _json_response(200, {"values": [{"id": 7, "name": "Sprint 7"}]})
+
+    sprint = fetch_active_sprint(_config(), "42")
+
+    assert sprint == JiraSprint(id="7", name="Sprint 7")
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_sprint_returns_none_when_no_active_sprint(mock_get):
+    mock_get.return_value = _json_response(200, {"values": []})
+
+    assert fetch_active_sprint(_config(), "42") is None
+
+
+@patch("et.jira.requests.get")
+def test_fetch_sprint_field_id_finds_field_by_name(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        [
+            {"id": "summary", "name": "Summary"},
+            {"id": "customfield_10020", "name": "Sprint"},
+        ],
+    )
+
+    assert fetch_sprint_field_id(_config()) == "customfield_10020"
+
+
+@patch("et.jira.requests.get")
+def test_fetch_sprint_field_id_returns_none_when_not_found(mock_get):
+    mock_get.return_value = _json_response(200, [{"id": "summary", "name": "Summary"}])
+
+    assert fetch_sprint_field_id(_config()) is None
+
+
+@patch("et.jira.requests.get")
+def test_fetch_bug_link_field_id_finds_field_by_name(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        [
+            {"id": "summary", "name": "Summary"},
+            {"id": "customfield_10050", "name": "Bug link"},
+        ],
+    )
+
+    assert fetch_bug_link_field_id(_config()) == "customfield_10050"
+
+
+@patch("et.jira.requests.get")
+def test_fetch_bug_link_field_id_returns_none_when_not_found(mock_get):
+    mock_get.return_value = _json_response(200, [{"id": "summary", "name": "Summary"}])
+
+    assert fetch_bug_link_field_id(_config()) is None
+
+
+@patch("et.jira.requests.post")
+def test_create_issue_returns_key(mock_post):
+    mock_post.return_value = _json_response(201, {"id": "10005", "key": "PROJ-42"})
+
+    key = create_issue(_config(), {"summary": "Do the thing"})
+
+    assert key == "PROJ-42"
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://example.atlassian.net/rest/api/3/issue"
+    assert kwargs["json"] == {"fields": {"summary": "Do the thing"}}
+
+
+@patch("et.jira.requests.post")
+def test_create_issue_raises_on_non_2xx_status(mock_post):
+    mock_post.return_value = _json_response(400, {"errorMessages": ["bad request"]})
+
+    with pytest.raises(JiraError, match="400"):
+        create_issue(_config(), {"summary": "Do the thing"})
+
+
+@patch("et.jira.requests.post", side_effect=requests.ConnectionError("no route to host"))
+def test_create_issue_wraps_network_errors(mock_post):
+    with pytest.raises(JiraError, match="no route to host"):
+        create_issue(_config(), {"summary": "Do the thing"})
+
+
+@patch("et.jira.requests.get")
+def test_discover_board_id_filters_by_board_type(mock_get):
+    mock_get.return_value = _json_response(200, {"values": [{"id": 7}]})
+
+    board_id = discover_board_id(_config(), "PROJ", board_type="scrum")
+
+    assert board_id == "7"
+    _args, kwargs = mock_get.call_args
+    assert kwargs["params"] == {"projectKeyOrId": "PROJ", "type": "scrum"}
+
+
+@patch("et.jira.requests.get")
+def test_discover_board_id_omits_type_param_by_default(mock_get):
+    mock_get.return_value = _json_response(200, {"values": [{"id": 7}]})
+
+    discover_board_id(_config(), "PROJ")
+
+    _args, kwargs = mock_get.call_args
+    assert kwargs["params"] == {"projectKeyOrId": "PROJ"}
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_sprint_raises_board_without_sprints_error(mock_get):
+    mock_get.return_value = _json_response(
+        400, {"errorMessages": ["The board does not support sprints"], "errors": {}}
+    )
+
+    from et.jira import JiraBoardWithoutSprintsError
+
+    with pytest.raises(JiraBoardWithoutSprintsError, match="does not support sprints"):
+        fetch_active_sprint(_config(), "1304")
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_sprint_raises_generic_error_on_other_400(mock_get):
+    mock_get.return_value = _json_response(400, {"errorMessages": ["something else broke"]})
+
+    with pytest.raises(JiraError, match="400"):
+        fetch_active_sprint(_config(), "1304")

@@ -132,6 +132,58 @@ def test_load_config_parses_full_schema(config_dir):
     ]
 
 
+def test_load_config_parses_project_key_and_board_id(config_dir):
+    (config_dir / "config.yaml").write_text(
+        """
+        jira:
+          base_url: https://example.atlassian.net/
+          email: me@example.com
+          pat: secret-token
+          jql: "assignee = currentUser()"
+          project_key: ISD
+          board_id: "42"
+        workspaces: []
+        """
+    )
+    config = load_config()
+    assert config.jira is not None
+    assert config.jira.project_key == "ISD"
+    assert config.jira.board_id == "42"
+
+
+def test_load_config_defaults_project_key_and_board_id_to_none(config_dir):
+    (config_dir / "config.yaml").write_text(
+        """
+        jira:
+          base_url: https://example.atlassian.net/
+          email: me@example.com
+          pat: secret-token
+          jql: "assignee = currentUser()"
+        workspaces: []
+        """
+    )
+    config = load_config()
+    assert config.jira is not None
+    assert config.jira.project_key is None
+    assert config.jira.board_id is None
+
+
+def test_load_config_rejects_non_string_project_key(config_dir):
+    (config_dir / "config.yaml").write_text(
+        """
+        jira:
+          base_url: https://example.atlassian.net/
+          email: me@example.com
+          pat: secret-token
+          jql: "assignee = currentUser()"
+          project_key: 123
+        workspaces: []
+        """
+    )
+    with pytest.raises(ConfigError, match="project_key"):
+        load_config()
+
+
 def test_load_config_jira_priority_order_defaults_when_absent(config_dir):
     (config_dir / "config.yaml").write_text(
         """
@@ -177,6 +229,8 @@ def test_save_config_round_trips_through_load_config(config_dir):
             pat="secret-token",
             jql="assignee = currentUser()",
             priority_order=["High", "Low"],
+            project_key="ISD",
+            board_id="42",
         ),
         workspaces=[
             WorkspaceConfigEntry(name="mails", type="static"),

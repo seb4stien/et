@@ -9,6 +9,13 @@ from typing import TYPE_CHECKING
 import typer
 
 from et.config import ConfigError, load_config, load_workspace_names
+from et.jira_create import (
+    ISSUE_TYPES,
+    PRIORITIES,
+    IssueDraftPrompts,
+    JiraCreateError,
+    create_issue_interactive,
+)
 from et.jira_ref import jira_key_from_ref
 from et.jira_time import JiraLogTimeError, LogTimeResult, log_time_for_current_workspace
 from et.task import (
@@ -28,7 +35,7 @@ from et.ws import WsDeleteError, delete_active_workspace
 
 if TYPE_CHECKING:
     from et.config import EtConfig
-    from et.jira import JiraIssue
+    from et.jira import JiraComponent, JiraIssue
     from et.task import TaskCreateResult
 
 
@@ -178,6 +185,33 @@ def rename(
     typer.echo(f"Renamed workspace {index + 1} to '{new_name}'")
 
 
+def _jira_base_url() -> str:
+    """Return the configured Jira base URL (no trailing slash), or "" if unavailable."""
+    try:
+        config = load_config()
+    except ConfigError:
+        return ""
+    return config.jira.base_url.rstrip("/") if config.jira else ""
+
+
+def _jira_key_link(key: str) -> str:
+    """Return `key` as a clickable hyperlink to its Jira issue.
+
+    Falls back to plain `key` if no Jira base URL is configured.
+    """
+    base_url = _jira_base_url()
+    return _hyperlink(key, f"{base_url}/browse/{key}") if base_url else key
+
+
+def _jira_ref_link(key: str) -> str:
+    """Return "jira:<key>" as a clickable hyperlink to its Jira issue.
+
+    Falls back to plain "jira:<key>" if no Jira base URL is configured.
+    """
+    base_url = _jira_base_url()
+    return _hyperlink(f"jira:{key}", f"{base_url}/browse/{key}") if base_url else f"jira:{key}"
+
+
 def _print_workspace_jira_info(index: int, config: EtConfig) -> None:
     """Print the Jira issue (description + link) linked to workspace `index`, if any."""
     entry = config.workspaces[index] if index < len(config.workspaces) else None
@@ -189,12 +223,7 @@ def _print_workspace_jira_info(index: int, config: EtConfig) -> None:
 
     typer.echo(f"Workspace {index + 1}: {entry.name}")
     typer.echo(entry.description or "(no description)")
-
-    base_url = config.jira.base_url.rstrip("/") if config.jira else ""
-    if base_url:
-        typer.echo(_hyperlink(f"jira:{key}", f"{base_url}/browse/{key}"))
-    else:
-        typer.echo(f"jira:{key}")
+    typer.echo(_jira_ref_link(key))
 
 
 def _print_workspace_time_spent(index: int) -> None:
@@ -304,13 +333,17 @@ def jira_start() -> None:
 
     def confirm_transition(issue: JiraIssue) -> bool:
         status_display = issue.status or "an unknown state"
+        key_display = (
+            _hyperlink(issue.key, f"{base_url}/browse/{issue.key}") if base_url else issue.key
+        )
         return typer.confirm(
-            f"{issue.key} is currently '{status_display}'. Move it to 'In Progress'?"
+            f"{key_display} is currently '{status_display}'. Move it to 'In Progress'?",
+            default=True,
         )
 
     def confirm_grow(count: int) -> bool:
         return typer.confirm(
-            f"All {count} workspaces are in use. Add another workspace?"
+            f"All {count} workspaces are in use. Add another workspace?", default=True
         )
 
     try:
@@ -324,6 +357,131 @@ def jira_start() -> None:
         return
 
     _print_task_created(result)
+
+
+def _prompt_from_list(label: str, options: tuple[str, ...], default: str) -> str:
+    """Show a numbered list of `options` and return the user's pick (or `default`)."""
+    default_index = options.index(default) + 1 if default in options else 1
+    typer.echo(f"{label}:")
+    for position, option in enumerate(options, start=1):
+        marker = " (default)" if position == default_index else ""
+        typer.echo(f"  {position}. {option}{marker}")
+
+    choice = typer.prompt("Pick a number", default=str(default_index))
+    try:
+        selected = int(choice)
+    except ValueError:
+        selected = default_index
+    if selected < 1 or selected > len(options):
+        selected = default_index
+    return options[selected - 1]
+
+
+_COMPONENT_COLUMNS = 3
+
+
+def _prompt_component(components: list[JiraComponent]) -> JiraComponent | None:
+    """Show `components` as a numbered, 3-column list and return the user's pick (or None)."""
+    labels = ["0. (none)"] + [
+        f"{position}. {component.name}" for position, component in enumerate(components, start=1)
+    ]
+    column_width = max(len(label) for label in labels) + 2
+
+    typer.echo("Components:")
+    for row_start in range(0, len(labels), _COMPONENT_COLUMNS):
+        row = labels[row_start : row_start + _COMPONENT_COLUMNS]
+        typer.echo("".join(label.ljust(column_width) for label in row))
+
+    choice = typer.prompt("Pick a component number", default="0")
+    try:
+        selected = int(choice)
+    except ValueError:
+        selected = 0
+    if selected < 1 or selected > len(components):
+        return None
+    return components[selected - 1]
+
+
+def _confirm_create(fields: list[tuple[str, str]]) -> bool:
+    """Print a summary of the issue about to be created and ask for confirmation."""
+    typer.echo("\nAbout to create this issue:")
+    for label, value in fields:
+        typer.echo(f"  {label}: {value}")
+    return typer.confirm("Proceed?", default=True)
+
+
+@jira_app.command("create")
+def jira_create(
+    github_url: str | None = typer.Argument(
+        None,
+        help="Optional GitHub issue/PR URL (e.g. .../issues/263 or .../pull/410) to "
+        "pre-fill the summary/description from.",
+    ),
+) -> None:
+    """Create a new Jira issue interactively.
+
+    Prompts for the issue type (Bug/Story/Task, default Story — defaults
+    to Bug when GITHUB_URL points at an issue labeled "bug"), summary
+    (pre-filled from the GitHub issue/PR title when given), whether to
+    assign it to yourself (default yes), priority (default Medium), a
+    component from the project's component list, whether to add it to the
+    project's current sprint (default yes), an estimate in hours, and an
+    optional description (pre-filled from the GitHub issue/PR body when
+    given). Requires `jira.project_key` (and Jira credentials) in the
+    config file. Shows a summary of the issue and asks for confirmation
+    before creating it.
+    """
+
+    def prompt_type(default: str) -> str:
+        return _prompt_from_list("Type", ISSUE_TYPES, default)
+
+    def prompt_summary(default: str) -> str:
+        if default:
+            return str(typer.prompt("Summary", default=default))
+        return str(typer.prompt("Summary"))
+
+    def confirm_assign_self() -> bool:
+        return typer.confirm("Assign to yourself?", default=True)
+
+    def prompt_priority(default: str) -> str:
+        return _prompt_from_list("Priority", PRIORITIES, default)
+
+    def confirm_sprint() -> bool:
+        return typer.confirm("Add to the current sprint?", default=True)
+
+    def prompt_estimate_hours() -> str:
+        return str(typer.prompt("Estimate in hours (optional)", default=""))
+
+    def prompt_description(default: str) -> str:
+        return str(typer.prompt("Description (optional)", default=default))
+
+    def warn(message: str) -> None:
+        typer.echo(f"Warning: {message}", err=True)
+
+    prompts = IssueDraftPrompts(
+        prompt_type=prompt_type,
+        prompt_summary=prompt_summary,
+        confirm_assign_self=confirm_assign_self,
+        prompt_priority=prompt_priority,
+        select_component=_prompt_component,
+        confirm_sprint=confirm_sprint,
+        prompt_estimate_hours=prompt_estimate_hours,
+        prompt_description=prompt_description,
+        confirm_create=_confirm_create,
+        warn=warn,
+    )
+
+    try:
+        result = create_issue_interactive(prompts, github_url)
+    except (ConfigError, JiraCreateError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    if result is None:
+        typer.echo("Cancelled.")
+        return
+
+    typer.echo(f"Created {_hyperlink(result.key, result.url)}")
 
 
 @jira_app.command("log-time")
@@ -354,7 +512,8 @@ def jira_log_time(
 
     duration = format_duration(result.seconds_logged)
     typer.echo(
-        f"Logged {duration} to jira:{result.issue_key} (workspace {result.workspace_index + 1})"
+        f"Logged {duration} to {_jira_ref_link(result.issue_key)} "
+        f"(workspace {result.workspace_index + 1})"
     )
     if result.tracker_reset:
         typer.echo("Reset tracker to 0")
@@ -378,7 +537,7 @@ def jira_complete(
     def on_logged(result: LogTimeResult) -> None:
         duration = format_duration(result.seconds_logged)
         typer.echo(
-            f"Logged {duration} to jira:{result.issue_key} "
+            f"Logged {duration} to {_jira_ref_link(result.issue_key)} "
             f"(workspace {result.workspace_index + 1})"
         )
 
@@ -386,7 +545,7 @@ def jira_complete(
         return typer.confirm(f"Delete workspace {result.workspace_index + 1}?")
 
     def confirm_done(result: LogTimeResult) -> bool:
-        return typer.confirm(f"Move {result.issue_key} to 'Done'?")
+        return typer.confirm(f"Move {_jira_key_link(result.issue_key)} to 'Done'?")
 
     try:
         result = complete_task_for_current_workspace(
@@ -403,4 +562,4 @@ def jira_complete(
     if result.workspace_freed:
         typer.echo(f"Deleted workspace {workspace_number}")
     if result.moved_to_done:
-        typer.echo(f"Moved {result.log_result.issue_key} to 'Done'")
+        typer.echo(f"Moved {_jira_key_link(result.log_result.issue_key)} to 'Done'")
