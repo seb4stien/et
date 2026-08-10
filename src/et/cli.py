@@ -20,11 +20,24 @@ from et.tracker import TrackerError, find_timer_for_workspace, format_duration, 
 from et.workspaces import (
     WorkspaceError,
     get_active_workspace_index,
+    get_workspace_count,
     is_dynamic_workspaces_enabled,
     rename_active_workspace,
     rename_all_workspaces,
 )
-from et.ws import WsDeleteError, delete_active_workspace
+from et.ws import (
+    OrganizePlanRow,
+    WsDeleteError,
+    WsOrganizeError,
+    apply_organize_plan,
+    build_organize_editor_content,
+    build_organize_plan,
+    delete_active_workspace,
+    list_organize_candidates,
+    open_in_editor,
+    parse_organize_order,
+    prepare_organize,
+)
 
 if TYPE_CHECKING:
     from et.config import EtConfig
@@ -241,6 +254,88 @@ def ws_delete(
         f"Deleted workspace {result.workspace_index + 1} "
         f"(now managing {result.remaining_workspaces} {plural})"
     )
+
+
+def _format_organize_row(row: OrganizePlanRow) -> str:
+    """Format one `OrganizePlanRow` for the `ws organize` confirmation summary."""
+    key = jira_key_from_ref(row.entry.ref) or "-"
+    if row.timer is not None:
+        elapsed = row.timer.get("timeElapsed", 0)
+        seconds = elapsed if isinstance(elapsed, (int, float)) else 0
+        running = " (running)" if row.timer.get("running") else ""
+        timer_desc = f"{format_duration(seconds)}{running}"
+    else:
+        timer_desc = "no timer"
+    return (
+        f"  {row.old_slot + 1:>3} -> {row.new_slot + 1:<3} "
+        f"{row.entry.name:<20} {key:<12} {timer_desc}"
+    )
+
+
+@ws_app.command("organize")
+def ws_organize() -> None:
+    """Reorder dynamic workspaces by editing their order in `$EDITOR`.
+
+    Only non-`static` ("dynamic") workspaces are listed and reorderable;
+    `static` workspaces always keep their current slot. Opens `$EDITOR`
+    (falling back to `vi`) on a text listing of the dynamic workspaces;
+    reorder the lines (without adding, removing, or duplicating any) and
+    save to express the desired new order. Shows a before/after summary
+    (slot, name, linked Jira issue, tracker time) and asks for confirmation
+    before applying anything. Each moved workspace's Tracker timer follows
+    it to its new slot. The active GNOME workspace's index is left
+    unchanged — whatever task ends up in that slot is simply what's shown.
+    """
+    try:
+        config = load_config()
+        count = get_workspace_count()
+        entries = load_timers()
+    except (ConfigError, WorkspaceError, TrackerError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    workspaces_list, slots = prepare_organize(config, count)
+
+    if len(slots) < 2:
+        typer.echo("Nothing to organize: fewer than 2 dynamic workspaces.")
+        return
+
+    candidates = list_organize_candidates(workspaces_list, slots, entries)
+    editor_content = build_organize_editor_content(candidates)
+
+    try:
+        edited_content = open_in_editor(editor_content)
+        new_order = parse_organize_order(edited_content.splitlines(), slots)
+    except WsOrganizeError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    if new_order == slots:
+        typer.echo("No changes.")
+        return
+
+    try:
+        plan = build_organize_plan(workspaces_list, entries, slots, new_order)
+    except WsOrganizeError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    typer.echo("Proposed workspace order:")
+    typer.echo("  old -> new name                 jira         timer")
+    for row in sorted(plan, key=lambda row: row.new_slot):
+        typer.echo(_format_organize_row(row))
+
+    if not typer.confirm("Apply this reordering?", default=False):
+        typer.echo("Aborted.")
+        return
+
+    try:
+        apply_organize_plan(config, workspaces_list, entries, plan)
+    except (ConfigError, WorkspaceError, TrackerError, WsOrganizeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    typer.echo(f"Reorganized {len(plan)} workspaces.")
 
 
 def _print_task_created(result: TaskCreateResult) -> None:

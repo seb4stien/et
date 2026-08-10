@@ -1,4 +1,4 @@
-"""Orchestrates non-trivial `et ws` commands (currently just `et ws delete`).
+"""Orchestrates non-trivial `et ws` commands (`et ws delete` and `et ws organize`).
 
 `shift_workspaces_left` is also reused by `et.task` (`et jira complete`'s
 "shift everything after the freed slot left, instead of leaving a gap"
@@ -8,7 +8,12 @@ logic), which is why it lives here rather than directly in `et.workspaces`
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from et import tracker, workspaces
 from et.config import ConfigError, EtConfig, WorkspaceConfigEntry, load_config, save_config
@@ -21,12 +26,39 @@ class WsDeleteError(RuntimeError):
     """Raised when the active workspace cannot be deleted."""
 
 
+class WsOrganizeError(RuntimeError):
+    """Raised when the dynamic workspaces cannot be reorganized."""
+
+
 @dataclass(frozen=True)
 class WsDeleteResult:
     """Summary of what `delete_active_workspace` did."""
 
     workspace_index: int
     remaining_workspaces: int
+
+
+@dataclass(frozen=True)
+class OrganizeCandidate:
+    """One reorderable (non-`static`) slot, as shown to the user for `ws organize`."""
+
+    slot: int
+    entry: WorkspaceConfigEntry
+    timer: TimerEntry | None
+
+
+@dataclass(frozen=True)
+class OrganizePlanRow:
+    """One row of a computed `ws organize` plan: what ends up in `new_slot`.
+
+    `entry` and `timer` are the *post-move* values (timer already has its
+    `workspaceId`/`name` updated to `new_slot`, if it moved).
+    """
+
+    old_slot: int
+    new_slot: int
+    entry: WorkspaceConfigEntry
+    timer: TimerEntry | None
 
 
 def shift_workspaces_left(
@@ -89,6 +121,22 @@ def shift_workspaces_left(
     return timers_changed
 
 
+def _pad_workspaces_list(
+    config_workspaces: list[WorkspaceConfigEntry], min_length: int
+) -> list[WorkspaceConfigEntry]:
+    """Return `config_workspaces` padded with bare "ET-<n>" entries up to `min_length`.
+
+    Slots beyond the configured `workspaces` list (e.g. because GNOME's
+    workspace count is higher than the config lists, or because the active
+    workspace index is) are implicit "dynamic" slots — this makes them
+    explicit so callers can index into a uniform list.
+    """
+    padded_len = max(len(config_workspaces), min_length)
+    return list(config_workspaces) + [
+        default_entry(slot, "dynamic") for slot in range(len(config_workspaces), padded_len)
+    ]
+
+
 def _trim_trailing_default_entries(workspaces_list: list[WorkspaceConfigEntry]) -> None:
     """Drop trailing bare "ET-<n>" entries (mutating in place).
 
@@ -140,10 +188,7 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
     if count <= 1:
         raise WsDeleteError("cannot delete the last remaining workspace")
 
-    padded_len = max(len(config.workspaces), count, index + 1)
-    workspaces_list = list(config.workspaces) + [
-        default_entry(slot, "dynamic") for slot in range(len(config.workspaces), padded_len)
-    ]
+    workspaces_list = _pad_workspaces_list(config.workspaces, max(count, index + 1))
 
     entry = workspaces_list[index]
     if entry.type == "static":
@@ -200,9 +245,235 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
     return WsDeleteResult(workspace_index=index, remaining_workspaces=new_count)
 
 
+def prepare_organize(
+    config: EtConfig, workspace_count: int
+) -> tuple[list[WorkspaceConfigEntry], list[int]]:
+    """Return the padded workspaces list and the ascending list of non-`static` slots.
+
+    Pads `config.workspaces` out to `workspace_count` (same as
+    `delete_active_workspace` does) so implicit trailing "dynamic" slots
+    are visible, then returns which of those slots are reorderable (every
+    slot whose `type` isn't `"static"`).
+    """
+    workspaces_list = _pad_workspaces_list(config.workspaces, workspace_count)
+    slots = [i for i, entry in enumerate(workspaces_list) if entry.type != "static"]
+    return workspaces_list, slots
+
+
+def list_organize_candidates(
+    workspaces_list: list[WorkspaceConfigEntry], slots: list[int], entries: list[TimerEntry]
+) -> list[OrganizeCandidate]:
+    """Return one `OrganizeCandidate` per slot in `slots`, in the given order."""
+    return [
+        OrganizeCandidate(
+            slot=slot, entry=workspaces_list[slot], timer=find_timer_for_workspace(entries, slot)
+        )
+        for slot in slots
+    ]
+
+
+def format_organize_candidate_line(candidate: OrganizeCandidate) -> str:
+    """Format one `OrganizeCandidate` as a single tab-separated editor line."""
+    key = jira_key_from_ref(candidate.entry.ref) or "-"
+    if candidate.timer is not None:
+        elapsed = candidate.timer.get("timeElapsed", 0)
+        seconds = elapsed if isinstance(elapsed, (int, float)) else 0
+        running = " (running)" if candidate.timer.get("running") else ""
+        timer_desc = f"{tracker.format_duration(seconds)}{running}"
+    else:
+        timer_desc = "no timer"
+    return f"{candidate.slot + 1}\t{candidate.entry.name}\t{key}\t{timer_desc}"
+
+
+def build_organize_editor_content(candidates: list[OrganizeCandidate]) -> str:
+    """Build the git-rebase-todo-style text shown to the user in `$EDITOR`.
+
+    Each non-comment line starts with the workspace's original 1-based slot
+    number; reordering the lines (without adding/removing any) is how the
+    user expresses the desired new order. Parsed back by
+    `parse_organize_order`.
+    """
+    header = [
+        "# Reorder the lines below to change the order of your dynamic workspaces.",
+        "# Do not add, remove, or duplicate lines -- only reorder them.",
+        "# Lines starting with '#' (and blank lines) are ignored.",
+        "#",
+        "# slot\tname\tjira\ttimer",
+    ]
+    lines = [format_organize_candidate_line(candidate) for candidate in candidates]
+    return "\n".join(header + lines) + "\n"
+
+
+def parse_organize_order(lines: list[str], valid_slots: list[int]) -> list[int]:
+    """Parse the edited listing back into a 0-based slot order.
+
+    Reads the leading integer token off each non-blank, non-comment ("#")
+    line and converts it from the 1-based slot number shown to the user
+    back to a 0-based slot index. Raises `WsOrganizeError` unless the
+    result is exactly a permutation of `valid_slots` (nothing added,
+    removed, or duplicated).
+    """
+    order: list[int] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        token = stripped.split(maxsplit=1)[0]
+        try:
+            slot_number = int(token)
+        except ValueError as exc:
+            raise WsOrganizeError(f"could not parse workspace slot from line: {line!r}") from exc
+        order.append(slot_number - 1)
+
+    if sorted(order) != sorted(valid_slots):
+        expected = ", ".join(str(slot + 1) for slot in sorted(valid_slots))
+        raise WsOrganizeError(
+            "the edited list must contain each of the original workspace slots exactly "
+            f"once (expected: {expected})"
+        )
+
+    return order
+
+
+def build_organize_plan(
+    workspaces_list: list[WorkspaceConfigEntry],
+    entries: list[TimerEntry],
+    slots: list[int],
+    new_order: list[int],
+) -> list[OrganizePlanRow]:
+    """Compute the result of permuting `slots`' contents according to `new_order`.
+
+    `new_order[i]` is the *original* slot whose entry/timer ends up at
+    `slots[i]`. Since this is a closed permutation over the same slot set
+    (unlike `shift_workspaces_left`'s partial shift), every slot is both a
+    source and a destination exactly once, so no entry or Tracker timer is
+    ever dropped or orphaned — each row just describes where its old
+    slot's content is going. A moved timer (its slot actually changes) has
+    its `workspaceId`/`name` updated to match its new slot, matching the
+    "ET-<n>" convention `shift_workspaces_left` already uses; an unmoved
+    timer is returned unchanged.
+    """
+    if sorted(new_order) != sorted(slots):
+        raise WsOrganizeError("new_order must be a permutation of slots")
+
+    old_entries_by_slot = {slot: workspaces_list[slot] for slot in slots}
+    old_timers_by_slot = {slot: find_timer_for_workspace(entries, slot) for slot in slots}
+
+    rows = []
+    for position, src_slot in enumerate(new_order):
+        dst_slot = slots[position]
+        source_entry = old_entries_by_slot[src_slot]
+        moved_entry = WorkspaceConfigEntry(
+            name=source_entry.name,
+            type=workspaces_list[dst_slot].type,
+            ref=source_entry.ref,
+            description=source_entry.description,
+        )
+
+        source_timer = old_timers_by_slot[src_slot]
+        moved_timer: TimerEntry | None = None
+        if source_timer is not None:
+            if src_slot == dst_slot:
+                moved_timer = source_timer
+            else:
+                moved_timer = dict(source_timer)
+                moved_timer["workspaceId"] = dst_slot
+                moved_timer["name"] = f"ET-{dst_slot + 1}"
+
+        rows.append(
+            OrganizePlanRow(
+                old_slot=src_slot, new_slot=dst_slot, entry=moved_entry, timer=moved_timer
+            )
+        )
+
+    return rows
+
+
+def apply_organize_plan(
+    config: EtConfig,
+    workspaces_list: list[WorkspaceConfigEntry],
+    entries: list[TimerEntry],
+    plan: list[OrganizePlanRow],
+) -> None:
+    """Persist a `build_organize_plan` result: config, Tracker timers, GNOME names.
+
+    Rebuilds `workspaces_list` slot-by-slot from `plan`, and rebuilds
+    `entries` by dropping every timer bound to an affected slot and
+    re-adding each row's (possibly re-indexed) timer — safe because `plan`
+    is a closed permutation of the same slot set, so every affected slot
+    gets exactly one timer back. Raises `WsOrganizeError` wrapping any
+    `ConfigError`/`WorkspaceError`/`TrackerError`.
+    """
+    new_workspaces_list = list(workspaces_list)
+    for row in plan:
+        new_workspaces_list[row.new_slot] = row.entry
+
+    affected_slots = {row.new_slot for row in plan}
+    new_entries = [entry for entry in entries if entry.get("workspaceId") not in affected_slots]
+    for row in plan:
+        if row.timer is not None:
+            new_entries.append(row.timer)
+
+    timers_changed = any(row.old_slot != row.new_slot and row.timer is not None for row in plan)
+
+    saved_list = list(new_workspaces_list)
+    _trim_trailing_default_entries(saved_list)
+
+    rename_names = [item.name for item in new_workspaces_list]
+
+    try:
+        if timers_changed:
+            tracker.save_timers_with_reload(new_entries, "reorganizing workspaces")
+        save_config(replace(config, workspaces=saved_list))
+        workspaces.rename_all_workspaces(rename_names)
+    except (ConfigError, WorkspaceError, TrackerError) as exc:
+        raise WsOrganizeError(str(exc)) from exc
+
+
+def open_in_editor(content: str) -> str:
+    """Write `content` to a temp file, open it in `$EDITOR`, and return its final contents.
+
+    Falls back to "vi" if `$EDITOR` is unset. Raises `WsOrganizeError` if
+    the configured editor can't be found, or if it exits non-zero.
+    """
+    editor = os.environ.get("EDITOR") or "vi"
+    editor_command = editor.split()
+    if not editor_command:
+        raise WsOrganizeError("$EDITOR is set to an empty command")
+    if shutil.which(editor_command[0]) is None:
+        raise WsOrganizeError(
+            f"editor {editor_command[0]!r} not found; set $EDITOR to a valid command"
+        )
+
+    fd, path_str = tempfile.mkstemp(prefix="et-ws-organize-", suffix=".txt")
+    path = Path(path_str)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(content)
+
+        result = subprocess.run([*editor_command, str(path)], check=False)
+        if result.returncode != 0:
+            raise WsOrganizeError(f"editor exited with status {result.returncode}")
+
+        return path.read_text()
+    finally:
+        path.unlink(missing_ok=True)
+
+
 __all__ = [
     "WsDeleteError",
     "WsDeleteResult",
+    "WsOrganizeError",
+    "OrganizeCandidate",
+    "OrganizePlanRow",
     "shift_workspaces_left",
     "delete_active_workspace",
+    "prepare_organize",
+    "list_organize_candidates",
+    "format_organize_candidate_line",
+    "build_organize_editor_content",
+    "parse_organize_order",
+    "build_organize_plan",
+    "apply_organize_plan",
+    "open_in_editor",
 ]
