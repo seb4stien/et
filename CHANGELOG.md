@@ -6,6 +6,16 @@ All notable changes to `et` are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- `et git create-branch` (alias `et git cb`): create (and switch to) a git
+  branch named after the current task's Jira issue, following Canonical's
+  `type/scope-short-description-jirakey` PR branch naming convention.
+  Defaults to the issue linked to the active workspace (or `-j`/`--jira
+  KEY`); proposes a branch type from the issue's type/labels (`Bug`→`fix`,
+  `Story`→`feat`, `Task`→`chore`, `documentation` label→`docs`) that can be
+  overridden from the fixed `feat/fix/docs/chore/test/ci` list, and a
+  `scope-short-description` slug of the issue summary that's freely
+  editable; the trailing Jira key identifier is never editable. Prints the
+  issue's clickable link and summary before prompting.
 - `et jira comment [MESSAGE]`: add a comment to the Jira issue linked to
   the active workspace (or a different issue via `-j`/`--jira`), prompting
   for the message if not given as an argument.

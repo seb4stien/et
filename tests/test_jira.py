@@ -21,6 +21,7 @@ from et.jira import (
     fetch_active_sprint,
     fetch_bug_link_field_id,
     fetch_components,
+    fetch_issue_basis,
     fetch_issue_status,
     fetch_sprint_field_id,
     fetch_transitions,
@@ -461,6 +462,66 @@ def test_fetch_issue_status_raises_on_non_200_status(mock_get):
 def test_fetch_issue_status_wraps_network_errors(mock_get):
     with pytest.raises(JiraError, match="no route to host"):
         fetch_issue_status(_config(), "PROJ-1")
+
+
+# --- fetch_issue_basis ------------------------------------------------------
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_basis_returns_summary_type_and_labels(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        {
+            "fields": {
+                "summary": "Add wildcard SNI support",
+                "issuetype": {"name": "Story"},
+                "labels": ["backend", "documentation"],
+            }
+        },
+    )
+    config = _config(base_url="https://example.atlassian.net")
+
+    basis = fetch_issue_basis(config, "PROJ-1")
+
+    assert basis.summary == "Add wildcard SNI support"
+    assert basis.issue_type == "Story"
+    assert basis.labels == ("backend", "documentation")
+    args, kwargs = mock_get.call_args
+    assert args[0] == "https://example.atlassian.net/rest/api/3/issue/PROJ-1"
+    assert kwargs["params"] == {"fields": "summary,issuetype,labels"}
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_basis_defaults_labels_to_empty_tuple(mock_get):
+    mock_get.return_value = _json_response(
+        200, {"fields": {"summary": "A summary", "issuetype": {"name": "Bug"}}}
+    )
+
+    basis = fetch_issue_basis(_config(), "PROJ-1")
+
+    assert basis.labels == ()
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_basis_raises_when_no_summary_in_response(mock_get):
+    mock_get.return_value = _json_response(200, {"fields": {"issuetype": {"name": "Bug"}}})
+
+    with pytest.raises(JiraError, match="no summary found"):
+        fetch_issue_basis(_config(), "PROJ-1")
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_basis_raises_when_no_issue_type_in_response(mock_get):
+    mock_get.return_value = _json_response(200, {"fields": {"summary": "A summary"}})
+
+    with pytest.raises(JiraError, match="no issue type found"):
+        fetch_issue_basis(_config(), "PROJ-1")
+
+
+@patch("et.jira.requests.get", side_effect=requests.ConnectionError("no route to host"))
+def test_fetch_issue_basis_wraps_network_errors(mock_get):
+    with pytest.raises(JiraError, match="no route to host"):
+        fetch_issue_basis(_config(), "PROJ-1")
 
 
 def test_text_to_adf_splits_paragraphs_on_blank_lines():

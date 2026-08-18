@@ -22,6 +22,10 @@ log time against them.
   adds a comment to the linked issue, and moves the linked issue through its
   workflow (directly to "In Progress"/"Blocked", or interactively picked from
   a numbered list of the team's workflow statuses).
+- **`et git create-branch`** (alias **`et git cb`**) — create (and switch
+  to) a git branch named after the current task's Jira issue, following
+  Canonical's `type/scope-short-description-jirakey` branch naming
+  convention.
 
 ## Requirements
 
@@ -222,6 +226,40 @@ decremented to reclaim the slot and every non-`static` workspace after it is
 shifted one slot to the left (its Tracker timer follows it), so no gap is
 left in the middle of your workspaces. If only a single workspace remains
 (GNOME can't drop below one), its slot is reset to a bare `ET-<n>` instead.
+
+### Git
+
+```bash
+et git create-branch                         # branch off the active workspace's linked issue
+et git cb                                     # alias for the above
+et git create-branch -j ISD-1234              # branch off a specific issue instead
+```
+
+`et git create-branch` (aliased `et git cb`) creates a git branch for the
+current task's Jira issue, following Canonical's
+[PR branch naming convention](https://github.com/canonical/platform-engineering-docs/blob/main/docs/delivery-workflows/github/pull-requests/index.rst):
+`type/scope-short-description-jirakey` (e.g.
+`feat/tcp-wildcard-sni-support-isd-1234`). It defaults to the Jira issue
+linked to the active workspace; pass `-j`/`--jira KEY` to target a
+different issue instead (works outside a managed workspace too, like the
+`et jira` commands' own `-j`/`--jira`).
+
+It first prints the issue's clickable link and summary, then:
+
+- Proposes a **branch type** (one of `feat`/`fix`/`docs`/`chore`/`test`/`ci`)
+  computed from the issue: `Bug` → `fix`, `Story` → `feat`, `Task` →
+  `chore`; a `documentation` label always wins and defaults to `docs`
+  regardless of issue type. Prompts to accept the default or pick a
+  different one from the list — this becomes the branch's `type/` prefix,
+  which can't otherwise be typed in freely.
+- Proposes the `scope-short-description` segment as a slug of the issue
+  summary, editable at the prompt.
+- Appends the resolved Jira key (lowercased) as the branch's trailing
+  identifier — always the actual issue key, not editable.
+
+Fails with a clear error if not run inside a git repository, or if a local
+branch with the computed name already exists. On success, creates the
+branch from the current `HEAD` and switches to it (`git checkout -b`).
 
 ## Configuration
 

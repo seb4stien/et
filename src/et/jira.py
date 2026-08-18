@@ -85,6 +85,15 @@ class JiraSprint:
     name: str
 
 
+@dataclass(frozen=True)
+class JiraIssueBasis:
+    """The fields `et git create-branch` needs to name a branch after an issue."""
+
+    summary: str
+    issue_type: str
+    labels: tuple[str, ...]
+
+
 def text_to_adf(text: str) -> dict[str, object]:
     """Wrap plain text in the minimal Atlassian Document Format Jira expects.
 
@@ -419,6 +428,39 @@ def fetch_issue_status(jira_config: JiraConfig, issue_key: str) -> str:
     if not isinstance(name, str) or not name:
         raise JiraError(f"unexpected Jira API response from {url}: no status name found")
     return name
+
+
+def fetch_issue_basis(jira_config: JiraConfig, issue_key: str) -> JiraIssueBasis:
+    """Return `issue_key`'s summary, issue type name, and labels.
+
+    Calls Jira's `GET /rest/api/3/issue/{key}?fields=summary,issuetype,labels`
+    endpoint. Used by `et git create-branch` to propose a branch name.
+    Raises `JiraError` if the request cannot be made, Jira rejects it, or
+    the response has no usable summary/issue type.
+    """
+    url = _jira_url(jira_config, f"{ISSUE_PATH}/{issue_key}")
+    payload = _get_json(jira_config, url, params={"fields": "summary,issuetype,labels"})
+    if not isinstance(payload, dict):
+        raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
+
+    fields = payload.get("fields")
+    if not isinstance(fields, dict):
+        raise JiraError(f"unexpected Jira API response from {url}: no fields found")
+
+    summary = fields.get("summary")
+    if not isinstance(summary, str) or not summary:
+        raise JiraError(f"unexpected Jira API response from {url}: no summary found")
+
+    issue_type_field = fields.get("issuetype")
+    issue_type = issue_type_field.get("name") if isinstance(issue_type_field, dict) else None
+    if not isinstance(issue_type, str) or not issue_type:
+        raise JiraError(f"unexpected Jira API response from {url}: no issue type found")
+
+    labels_raw = fields.get("labels")
+    labels = tuple(label for label in labels_raw if isinstance(label, str)) \
+        if isinstance(labels_raw, list) else ()
+
+    return JiraIssueBasis(summary=summary, issue_type=issue_type, labels=labels)
 
 
 def _fetch_issue_pages(jira_config: JiraConfig, url: str) -> list[object]:

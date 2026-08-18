@@ -7,6 +7,7 @@ import logging
 from unittest.mock import patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from et.cli import _hyperlink, app
@@ -1027,3 +1028,192 @@ def test_jira_create_reports_no_board_configured_error(mock_create):
 
     assert result.exit_code == 1
     assert "Error: no Jira Agile board configured" in result.output
+
+
+# --- git create-branch -------------------------------------------------------
+
+
+@patch("et.cli.create_branch_interactive")
+@patch("et.cli.resolve_issue_key")
+@patch("et.cli.load_config")
+def test_git_create_branch_creates_and_switches(mock_load_config, mock_resolve, mock_create):
+    from et.git_branch import BranchCreateResult
+
+    config = _config([])
+    mock_load_config.return_value = config
+    mock_resolve.return_value = (config.jira, "ISD-1234")
+    mock_create.return_value = BranchCreateResult(
+        name="feat/some-feature-isd-1234", issue_key="ISD-1234"
+    )
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["git", "create-branch"])
+
+    assert result.exit_code == 0
+    assert "Created and switched to branch 'feat/some-feature-isd-1234'" in result.stdout
+    mock_resolve.assert_called_once_with(config, issue_key=None)
+    args, kwargs = mock_create.call_args
+    assert args[0] == config.jira
+    assert args[1] == "ISD-1234"
+    assert callable(kwargs["select_type"])
+    assert callable(kwargs["edit_description"])
+    assert callable(kwargs["announce_issue"])
+
+
+@patch("et.cli.create_branch_interactive")
+@patch("et.cli.resolve_issue_key")
+@patch("et.cli.load_config")
+def test_git_cb_is_an_alias_for_create_branch(mock_load_config, mock_resolve, mock_create):
+    from et.git_branch import BranchCreateResult
+
+    config = _config([])
+    mock_load_config.return_value = config
+    mock_resolve.return_value = (config.jira, "ISD-1234")
+    mock_create.return_value = BranchCreateResult(
+        name="feat/some-feature-isd-1234", issue_key="ISD-1234"
+    )
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["git", "cb"])
+
+    assert result.exit_code == 0
+    assert "Created and switched to branch 'feat/some-feature-isd-1234'" in result.stdout
+
+
+@patch("et.cli.create_branch_interactive")
+@patch("et.cli.resolve_issue_key")
+@patch("et.cli.load_config")
+def test_git_create_branch_announces_issue_link_and_summary_first(
+    mock_load_config, mock_resolve, mock_create
+):
+    from et.git_branch import BranchCreateResult, JiraIssueBasis
+
+    config = _config([])
+    mock_load_config.return_value = config
+    mock_resolve.return_value = (config.jira, "ISD-1234")
+
+    def fake_create(jira_config, issue_key, *, select_type, edit_description, announce_issue):
+        announce_issue(
+            JiraIssueBasis(summary="Add wildcard SNI support", issue_type="Story", labels=())
+        )
+        return BranchCreateResult(name="feat/some-feature-isd-1234", issue_key="ISD-1234")
+
+    mock_create.side_effect = fake_create
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["git", "create-branch"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == "ISD-1234: Add wildcard SNI support"
+    assert "Created and switched to branch" in lines[-1]
+
+
+@patch("et.cli.create_branch_interactive")
+@patch("et.cli.resolve_issue_key")
+@patch("et.cli.load_config")
+def test_git_create_branch_forwards_explicit_jira_key(mock_load_config, mock_resolve, mock_create):
+    from et.git_branch import BranchCreateResult
+
+    config = _config([])
+    mock_load_config.return_value = config
+    mock_resolve.return_value = (config.jira, "ISD-99")
+    mock_create.return_value = BranchCreateResult(name="fix/a-bug-isd-99", issue_key="ISD-99")
+
+    result = runner.invoke(app, ["git", "create-branch", "--jira", "ISD-99"])
+
+    assert result.exit_code == 0
+    mock_resolve.assert_called_once_with(config, issue_key="ISD-99")
+
+
+@patch("et.cli.create_branch_interactive", return_value=None)
+@patch("et.cli.resolve_issue_key")
+@patch("et.cli.load_config")
+def test_git_create_branch_prints_cancelled_when_result_none(
+    mock_load_config, mock_resolve, mock_create
+):
+    config = _config([])
+    mock_load_config.return_value = config
+    mock_resolve.return_value = (config.jira, "ISD-1")
+
+    result = runner.invoke(app, ["git", "create-branch"])
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.stdout
+
+
+@patch("et.cli.create_branch_interactive")
+@patch("et.cli.resolve_issue_key")
+@patch("et.cli.load_config")
+def test_git_create_branch_reports_not_a_git_repo_error(
+    mock_load_config, mock_resolve, mock_create
+):
+    from et.git_branch import GitBranchError
+
+    config = _config([])
+    mock_load_config.return_value = config
+    mock_resolve.return_value = (config.jira, "ISD-1")
+    mock_create.side_effect = GitBranchError("not inside a git repository")
+
+    result = runner.invoke(app, ["git", "create-branch"])
+
+    assert result.exit_code == 1
+    assert "Error: not inside a git repository" in result.output
+
+
+@patch("et.cli.create_branch_interactive")
+@patch("et.cli.resolve_issue_key")
+@patch("et.cli.load_config")
+def test_git_create_branch_reports_branch_already_exists_error(
+    mock_load_config, mock_resolve, mock_create
+):
+    from et.git_branch import GitBranchError
+
+    config = _config([])
+    mock_load_config.return_value = config
+    mock_resolve.return_value = (config.jira, "ISD-1")
+    mock_create.side_effect = GitBranchError("branch 'feat/x-isd-1' already exists")
+
+    result = runner.invoke(app, ["git", "create-branch"])
+
+    assert result.exit_code == 1
+    assert "Error: branch 'feat/x-isd-1' already exists" in result.output
+
+
+@patch("et.cli.resolve_issue_key")
+def test_git_create_branch_reports_no_active_workspace_error(mock_resolve):
+    mock_resolve.side_effect = JiraLogTimeError("no Jira issue linked to workspace 1")
+
+    result = runner.invoke(app, ["git", "create-branch"])
+
+    assert result.exit_code == 1
+    assert "Error: no Jira issue linked to workspace 1" in result.output
+
+
+def test_select_branch_type_accepts_default():
+    from et.cli import _select_branch_type
+
+    with patch("et.cli.typer.prompt", return_value="feat"):
+        assert _select_branch_type("feat") == "feat"
+
+
+def test_select_branch_type_accepts_override():
+    from et.cli import _select_branch_type
+
+    with patch("et.cli.typer.prompt", return_value="chore"):
+        assert _select_branch_type("feat") == "chore"
+
+
+def test_select_branch_type_rejects_invalid_choice():
+    from et.cli import _select_branch_type
+
+    with patch("et.cli.typer.prompt", return_value="bogus"):
+        with pytest.raises(typer.Exit):
+            _select_branch_type("feat")
+
+
+def test_edit_branch_description_returns_stripped_input():
+    from et.cli import _edit_branch_description
+
+    with patch("et.cli.typer.prompt", return_value="  custom slug  "):
+        assert _edit_branch_description("default-slug") == "custom slug"

@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING, cast
 import typer
 
 from et.config import ConfigError, load_config, load_workspace_names
+from et.git_branch import (
+    BRANCH_TYPES,
+    GitBranchError,
+    create_branch_interactive,
+)
 from et.jira_create import (
     ISSUE_TYPES,
     PRIORITIES,
@@ -22,6 +27,7 @@ from et.jira_time import (
     LogTimeResult,
     log_manual_time_for_current_workspace,
     log_time_for_current_workspace,
+    resolve_issue_key,
 )
 from et.task import (
     BLOCKED_STATUS,
@@ -93,6 +99,9 @@ jira_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(jira_app, name="jira")
+
+git_app = typer.Typer(help="Git helpers that build on the Jira integration.", no_args_is_help=True)
+app.add_typer(git_app, name="git")
 
 
 @app.callback(invoke_without_command=True)
@@ -814,3 +823,59 @@ def jira_status(
     except (ConfigError, WorkspaceError, JiraLogTimeError, TaskError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
+
+
+def _select_branch_type(default_type: str) -> str | None:
+    """Prompt to accept `default_type` or pick a different one from `BRANCH_TYPES`."""
+    choices = ", ".join(BRANCH_TYPES)
+    typer.echo(f"Branch type (default: {default_type}) [{choices}]")
+    choice = str(typer.prompt("Branch type", default=default_type))
+    choice = choice.strip().lower()
+    if choice not in BRANCH_TYPES:
+        typer.echo(f"Error: branch type must be one of: {choices}", err=True)
+        raise typer.Exit(code=1)
+    return choice
+
+
+def _edit_branch_description(default_slug: str) -> str | None:
+    """Prompt to accept/overwrite the proposed `scope-short-description` slug."""
+    edited = str(typer.prompt("Branch description", default=default_slug))
+    return edited.strip()
+
+
+@git_app.command("create-branch")
+@git_app.command("cb")
+def git_create_branch(jira_key: str | None = _jira_key_option()) -> None:
+    """Create (and switch to) a git branch named after the current task's Jira issue.
+
+    Follows the `type/scope-short-description-jirakey` convention: the type
+    (feat/fix/docs/chore/test/ci) defaults from the issue's type/labels but
+    can be overridden, the middle segment defaults to a slug of the issue
+    summary and can be freely edited, and the trailing Jira key is fixed.
+    Defaults to the issue linked to the active workspace; pass -j/--jira to
+    target a different issue instead. Aliased as `et git cb`.
+    """
+    try:
+        config = load_config()
+        jira_config, resolved_key = resolve_issue_key(config, issue_key=jira_key)
+        result = create_branch_interactive(
+            jira_config,
+            resolved_key,
+            select_type=_select_branch_type,
+            edit_description=_edit_branch_description,
+            announce_issue=lambda basis: typer.echo(
+                f"{_jira_key_link(resolved_key)}: {basis.summary}"
+            ),
+        )
+    except (ConfigError, WorkspaceError, JiraLogTimeError, GitBranchError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    if result is None:
+        typer.echo("Cancelled.")
+        return
+
+    typer.echo(
+        f"Created and switched to branch '{result.name}' for {_jira_key_link(result.issue_key)}"
+    )
+
