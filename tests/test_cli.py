@@ -1181,7 +1181,9 @@ def test_git_create_branch_reports_branch_already_exists_error(
 
 
 @patch("et.cli.resolve_issue_key")
-def test_git_create_branch_reports_no_active_workspace_error(mock_resolve):
+@patch("et.cli.load_config")
+def test_git_create_branch_reports_no_active_workspace_error(mock_load_config, mock_resolve):
+    mock_load_config.return_value = _config([])
     mock_resolve.side_effect = JiraLogTimeError("no Jira issue linked to workspace 1")
 
     result = runner.invoke(app, ["git", "create-branch"])
