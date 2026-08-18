@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import typer
 
@@ -407,6 +407,24 @@ def _print_task_created(result: TaskCreateResult) -> None:
         )
 
 
+def _jira_key_option() -> str | None:
+    """Shared `-j/--jira KEY` option for commands acting on "the current ticket".
+
+    Lets the caller target a specific Jira issue instead of the one linked
+    to the active workspace. When given, these commands skip workspace
+    resolution entirely (so they work even outside a managed workspace).
+    """
+    return cast(
+        "str | None",
+        typer.Option(
+            None,
+            "--jira",
+            "-j",
+            help="Jira issue key to act on, instead of the active workspace's linked issue.",
+        ),
+    )
+
+
 @jira_app.command("start")
 def jira_start() -> None:
     """Start a new task: allocate a workspace slot, its Tracker timer, and switch to it.
@@ -622,6 +640,7 @@ def jira_log_time(
         help="Don't reset the tracker after logging (leaves its elapsed time as-is). "
         "Only meaningful without a manual [Xh] duration.",
     ),
+    jira_key: str | None = _jira_key_option(),
 ) -> None:
     """Log the active task's tracked time to its Jira issue.
 
@@ -645,9 +664,13 @@ def jira_log_time(
     try:
         if hours is not None:
             seconds = parse_hours_to_seconds(hours)
-            result = log_manual_time_for_current_workspace(seconds, description=comment)
+            result = log_manual_time_for_current_workspace(
+                seconds, description=comment, issue_key=jira_key
+            )
         else:
-            result = log_time_for_current_workspace(description=comment, reset=not no_reset)
+            result = log_time_for_current_workspace(
+                description=comment, reset=not no_reset, issue_key=jira_key
+            )
     except (ConfigError, WorkspaceError, JiraLogTimeError, ValueError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
@@ -666,6 +689,7 @@ def jira_complete(
     comment: str | None = typer.Option(
         None, "--comment", "-m", help="Worklog description/comment to attach in Jira."
     ),
+    jira_key: str | None = _jira_key_option(),
 ) -> None:
     """Log the active task's tracked time to Jira, then optionally clean up.
 
@@ -692,6 +716,7 @@ def jira_complete(
     try:
         result = complete_task_for_current_workspace(
             comment=comment,
+            issue_key=jira_key,
             on_logged=on_logged,
             confirm_delete=confirm_delete,
             confirm_done=confirm_done,
@@ -712,24 +737,19 @@ def jira_comment(
     message: str | None = typer.Argument(
         None, help="Comment text to add to the Jira issue."
     ),
-    key: str | None = typer.Option(
-        None,
-        "--key",
-        "-k",
-        help="Jira issue key to comment on, instead of the active workspace's linked issue.",
-    ),
+    jira_key: str | None = _jira_key_option(),
 ) -> None:
     """Add a comment to the current task's linked Jira issue.
 
-    Defaults to the Jira issue linked to the active workspace; pass --key
-    to comment on a different issue instead. Prompts for the message if not
-    given as an argument.
+    Defaults to the Jira issue linked to the active workspace; pass
+    -j/--jira to comment on a different issue instead. Prompts for the
+    message if not given as an argument.
     """
     if message is None:
         message = typer.prompt("Comment")
 
     try:
-        issue_key = add_comment_to_current_workspace(message, issue_key=key)
+        issue_key = add_comment_to_current_workspace(message, issue_key=jira_key)
     except (ConfigError, WorkspaceError, JiraLogTimeError, TaskError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
@@ -750,6 +770,7 @@ def jira_status(
         help='Target status: "in-progress" or "blocked". Omit to pick interactively from '
         "the full workflow list.",
     ),
+    jira_key: str | None = _jira_key_option(),
 ) -> None:
     """Move the active task's linked Jira issue to a new status.
 
@@ -765,11 +786,15 @@ def jira_status(
                 choices = ", ".join(_STATUS_SHORTCUTS)
                 typer.echo(f"Error: status must be one of: {choices}", err=True)
                 raise typer.Exit(code=1)
-            issue_key = set_status_for_current_workspace(_STATUS_SHORTCUTS[normalized])
+            issue_key = set_status_for_current_workspace(
+                _STATUS_SHORTCUTS[normalized], issue_key=jira_key
+            )
             typer.echo(f"Moved {_jira_key_link(issue_key)} to '{_STATUS_LABELS[normalized]}'")
             return
 
-        issue_key, current_status = get_current_status_for_current_workspace()
+        issue_key, current_status = get_current_status_for_current_workspace(
+            issue_key=jira_key
+        )
         typer.echo(f"{_jira_key_link(issue_key)} is currently: {current_status}")
         for index, name in enumerate(STATUS_WORKFLOW_ORDER, start=1):
             typer.echo(f"  {index}. {name}")
@@ -784,7 +809,7 @@ def jira_status(
             raise typer.Exit(code=1)
 
         target_status = STATUS_WORKFLOW_ORDER[int(choice) - 1]
-        issue_key = set_status_for_current_workspace(target_status)
+        issue_key = set_status_for_current_workspace(target_status, issue_key=jira_key)
         typer.echo(f"Moved {_jira_key_link(issue_key)} to '{target_status}'")
     except (ConfigError, WorkspaceError, JiraLogTimeError, TaskError) as error:
         typer.echo(f"Error: {error}", err=True)

@@ -195,7 +195,7 @@ Tracker timer's elapsed time — the Tracker timer isn't read or reset in
 that case (so `--no-reset` doesn't apply).
 
 `et jira comment [MESSAGE]` adds a comment to the Jira issue linked to the
-active workspace (or a different issue via `--key`/`-k KEY`). Prompts for
+active workspace (or a different issue via `-j/--jira KEY`). Prompts for
 the message if not given as an argument.
 
 `et jira status [in-progress|blocked]` moves the linked issue directly to
@@ -204,6 +204,13 @@ argument, it shows the linked issue's current status and a numbered list of
 the team's workflow statuses (`Untriaged`, `Triaged`, `In Progress`,
 `Blocked`, `In Review`, `To Be Deployed`, `Done`, `Rejected`) to pick a new
 one from interactively; leave the prompt blank to cancel.
+
+`et jira log-time`, `et jira complete`, `et jira comment`, and `et jira
+status` all accept a `-j`/`--jira KEY` option to act on a specific Jira
+issue instead of the one linked to the active workspace — e.g. `et jira
+comment "Looks good" -j ISD-123` or `et jira status blocked --jira
+ISD-123`. For `comment` and `status`, this also skips workspace resolution
+entirely, so those two work even outside a managed workspace.
 
 `et jira complete` logs the active workspace's tracked time to Jira (like
 `et jira log-time`) and tells you how much it logged. It then asks whether

@@ -43,13 +43,49 @@ class LogTimeResult:
     tracker_reset: bool
 
 
-def resolve_active_issue(config: EtConfig) -> tuple[JiraConfig, int, str]:
-    """Return the active workspace's (jira_config, workspace_index, issue_key).
+def resolve_issue_key(config: EtConfig, *, issue_key: str | None = None) -> tuple[JiraConfig, str]:
+    """Return (jira_config, issue_key) to act against, without requiring an active workspace.
 
-    Raises `JiraLogTimeError` if there's no 'jira' config block, or no Jira
-    issue is linked to the active workspace (via a "jira:<KEY>" ref).
-    Shared by every current-workspace Jira action (log-time, comment,
-    status).
+    When `issue_key` is given (e.g. from `et jira`'s `-j/--jira KEY`
+    override), it's used directly — no GNOME/workspace lookup happens at
+    all, so this works even outside a managed workspace. Otherwise falls
+    back to `resolve_active_issue`, which resolves the active workspace's
+    linked issue. Used by actions that don't need the workspace index
+    itself (comment, status) — `log-time`/`complete` use
+    `resolve_active_issue` directly since they also need the index (for
+    the Tracker timer / workspace deletion).
+
+    Raises `JiraLogTimeError` if there's no 'jira' config block, or (when
+    `issue_key` isn't given) no Jira issue is linked to the active
+    workspace.
+    """
+    if issue_key is not None:
+        if config.jira is None:
+            raise JiraLogTimeError(
+                "no 'jira' block found in the config file "
+                "(add base_url/email/pat/jql under a top-level 'jira:' key)"
+            )
+        return config.jira, issue_key
+
+    jira_config, _, resolved_key = resolve_active_issue(config)
+    return jira_config, resolved_key
+
+
+def resolve_active_issue(
+    config: EtConfig, *, issue_key: str | None = None
+) -> tuple[JiraConfig, int, str]:
+    """Return (jira_config, workspace_index, issue_key) to act against.
+
+    When `issue_key` is given, it's used directly (e.g. from `et jira`'s
+    `-j/--jira KEY` override) — the active workspace's linked ref is never
+    consulted for the issue key, only for its index (still needed by
+    Tracker-timer-based actions like `log-time`). Otherwise the active
+    workspace's linked issue ("jira:<KEY>" ref) is resolved as before.
+
+    Raises `JiraLogTimeError` if there's no 'jira' config block, or (when
+    `issue_key` isn't given) no Jira issue is linked to the active
+    workspace. Shared by every current-workspace Jira action (log-time,
+    comment, status, complete).
     """
     if config.jira is None:
         raise JiraLogTimeError(
@@ -58,31 +94,38 @@ def resolve_active_issue(config: EtConfig) -> tuple[JiraConfig, int, str]:
         )
 
     index = workspaces.get_active_workspace_index()
+    if issue_key is not None:
+        return config.jira, index, issue_key
+
     entry = config.workspaces[index] if index < len(config.workspaces) else None
-    issue_key = jira_key_from_ref(entry.ref) if entry else None
-    if issue_key is None:
+    resolved_key = jira_key_from_ref(entry.ref) if entry else None
+    if resolved_key is None:
         raise JiraLogTimeError(f"no Jira issue linked to workspace {index + 1}")
 
-    return config.jira, index, issue_key
+    return config.jira, index, resolved_key
 
 
 def log_time_for_current_workspace(
-    *, description: str | None = None, reset: bool = True
+    *, description: str | None = None, reset: bool = True, issue_key: str | None = None
 ) -> LogTimeResult:
     """Log the active workspace's ET-<n> tracker elapsed time to its Jira issue.
+
+    Logs against `issue_key` if given (e.g. via `-j/--jira`), instead of the
+    issue linked to the active workspace — the Tracker timer read/reset
+    still applies to the active workspace regardless.
 
     Raises `ConfigError` if the config file is missing/malformed,
     `WorkspaceError` if the active workspace can't be determined, and
     `JiraLogTimeError` if: there's no 'jira' config block, no Jira issue is
-    linked to the active workspace, no Tracker timer is bound to it (or its
-    elapsed time is under `MIN_LOGGABLE_SECONDS`), or the Jira API call
-    fails.
+    linked to the active workspace (and none was given explicitly), no
+    Tracker timer is bound to it (or its elapsed time is under
+    `MIN_LOGGABLE_SECONDS`), or the Jira API call fails.
 
     On success, resets the tracker to 0 (unless `reset=False`) so the same
     elapsed time isn't accidentally logged again later.
     """
     config: EtConfig = load_config()
-    jira_config, index, issue_key = resolve_active_issue(config)
+    jira_config, index, resolved_key = resolve_active_issue(config, issue_key=issue_key)
 
     entries = tracker.load_timers()
     timer = tracker.find_timer_for_workspace(entries, index)
@@ -95,7 +138,7 @@ def log_time_for_current_workspace(
         )
 
     try:
-        create_worklog(jira_config, issue_key, seconds, comment=description)
+        create_worklog(jira_config, resolved_key, seconds, comment=description)
     except JiraError as exc:
         raise JiraLogTimeError(str(exc)) from exc
 
@@ -110,35 +153,37 @@ def log_time_for_current_workspace(
 
     return LogTimeResult(
         workspace_index=index,
-        issue_key=issue_key,
+        issue_key=resolved_key,
         seconds_logged=seconds,
         tracker_reset=reset,
     )
 
 
 def log_manual_time_for_current_workspace(
-    seconds: int, *, description: str | None = None
+    seconds: int, *, description: str | None = None, issue_key: str | None = None
 ) -> LogTimeResult:
     """Log a manually-specified `seconds` duration to the active workspace's Jira issue.
 
     Like `log_time_for_current_workspace`, but the duration comes from the
     caller (e.g. `et jira log-time 2h`) instead of the Tracker timer's
-    elapsed time — so the Tracker timer is never read or reset. Raises
+    elapsed time — so the Tracker timer is never read or reset. Logs
+    against `issue_key` if given (e.g. via `-j/--jira`), instead of the
+    issue linked to the active workspace. Raises
     `ConfigError`/`WorkspaceError`/`JiraLogTimeError` under the same
     conditions as `log_time_for_current_workspace` (minus the
     Tracker-timer-related ones).
     """
     config: EtConfig = load_config()
-    jira_config, index, issue_key = resolve_active_issue(config)
+    jira_config, index, resolved_key = resolve_active_issue(config, issue_key=issue_key)
 
     try:
-        create_worklog(jira_config, issue_key, seconds, comment=description)
+        create_worklog(jira_config, resolved_key, seconds, comment=description)
     except JiraError as exc:
         raise JiraLogTimeError(str(exc)) from exc
 
     return LogTimeResult(
         workspace_index=index,
-        issue_key=issue_key,
+        issue_key=resolved_key,
         seconds_logged=seconds,
         tracker_reset=False,
     )

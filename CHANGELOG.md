@@ -7,7 +7,7 @@ All notable changes to `et` are documented here. Format loosely follows
 
 ### Added
 - `et jira comment [MESSAGE]`: add a comment to the Jira issue linked to
-  the active workspace (or a different issue via `--key`/`-k`), prompting
+  the active workspace (or a different issue via `-j`/`--jira`), prompting
   for the message if not given as an argument.
 - `et jira log-time [Xh]`: log a manually-specified duration (e.g. `2h`,
   `1.5h`) to the linked Jira issue instead of reading the Tracker timer's
@@ -16,6 +16,9 @@ All notable changes to `et` are documented here. Format loosely follows
   directly to "In Progress" or "Blocked". With no argument, shows the
   issue's current status and a numbered list of the team's workflow
   statuses to pick a new one from interactively.
+- `-j`/`--jira KEY`: generic option on `et jira log-time`, `complete`,
+  `comment`, and `status` to act on a specific Jira issue instead of the
+  one linked to the active workspace.
 - `et jira create [GITHUB_URL]`: interactively create a Jira issue —
   prompts for type (Bug/Story/Task), summary, self-assignment, priority,
   component (3-column picker), current sprint, estimate hours, and

@@ -12,6 +12,7 @@ from et.jira_time import (
     JiraLogTimeError,
     log_manual_time_for_current_workspace,
     log_time_for_current_workspace,
+    resolve_issue_key,
 )
 from et.tracker import TrackerError
 from et.workspaces import WorkspaceError
@@ -256,3 +257,79 @@ def test_log_manual_time_wraps_jira_errors(mock_load_config, mock_index, mock_cr
 
     with pytest.raises(JiraLogTimeError, match="boom"):
         log_manual_time_for_current_workspace(7200)
+
+
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.tracker.load_timers")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.jira_time.load_config")
+def test_log_time_uses_explicit_issue_key_override(
+    mock_load_config, mock_index, mock_load_timers, mock_create_worklog
+):
+    # Even with an override, the workspace index is still needed (Tracker
+    # timer / workspace deletion are tied to the physical workspace, not
+    # the ticket), so get_active_workspace_index is still called.
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+    mock_load_timers.return_value = [_timer(0, 4320)]
+
+    with patch("et.jira_time.tracker.save_timers_with_reload"):
+        result = log_time_for_current_workspace(issue_key="ISD-999")
+
+    assert result.issue_key == "ISD-999"
+    mock_create_worklog.assert_called_once_with(
+        mock_load_config.return_value.jira, "ISD-999", 4320, comment=None
+    )
+
+
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.jira_time.load_config")
+def test_log_manual_time_uses_explicit_issue_key_override(
+    mock_load_config, mock_index, mock_create_worklog
+):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+
+    result = log_manual_time_for_current_workspace(7200, issue_key="ISD-999")
+
+    assert result.issue_key == "ISD-999"
+    mock_create_worklog.assert_called_once_with(
+        mock_load_config.return_value.jira, "ISD-999", 7200, comment=None
+    )
+
+
+@patch("et.jira_time.workspaces.get_active_workspace_index")
+@patch("et.jira_time.load_config")
+def test_resolve_issue_key_skips_workspace_lookup_when_override_given(
+    mock_load_config, mock_index
+):
+    mock_load_config.return_value = _config(with_jira=True)
+
+    jira_config, resolved_key = resolve_issue_key(
+        mock_load_config.return_value, issue_key="ISD-42"
+    )
+
+    assert resolved_key == "ISD-42"
+    assert jira_config is mock_load_config.return_value.jira
+    mock_index.assert_not_called()
+
+
+def test_resolve_issue_key_raises_when_override_given_but_no_jira_config():
+    config = _config(with_jira=False)
+
+    with pytest.raises(JiraLogTimeError, match="no 'jira' block"):
+        resolve_issue_key(config, issue_key="ISD-42")
+
+
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+def test_resolve_issue_key_falls_back_to_active_workspace_without_override(mock_index):
+    config = _config([WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")])
+
+    jira_config, resolved_key = resolve_issue_key(config)
+
+    assert resolved_key == "ISD-321"
+    assert jira_config is config.jira
+    mock_index.assert_called_once()

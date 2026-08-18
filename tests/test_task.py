@@ -467,12 +467,28 @@ def test_complete_task_deletes_workspace_after_logging(
         comment="done", confirm_delete=lambda _result: True
     )
 
-    mock_log_time.assert_called_once_with(description="done", reset=True)
+    mock_log_time.assert_called_once_with(description="done", reset=True, issue_key=None)
     assert result.log_result.issue_key == "ISD-2"
     assert result.workspace_freed is True
     # The completed workspace is reclaimed exactly like `et ws delete` — force
     # because it's still linked to the (already time-logged) Jira issue.
     mock_delete.assert_called_once_with(force=True)
+
+
+@patch("et.task.load_config")
+@patch("et.task.log_time_for_current_workspace")
+def test_complete_task_forwards_issue_key_override(mock_log_time, mock_load_config):
+    mock_log_time.return_value = LogTimeResult(
+        workspace_index=1, issue_key="ISD-999", seconds_logged=780, tracker_reset=True
+    )
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")]
+    )
+
+    result = complete_task_for_current_workspace(comment="done", issue_key="ISD-999")
+
+    mock_log_time.assert_called_once_with(description="done", reset=True, issue_key="ISD-999")
+    assert result.log_result.issue_key == "ISD-999"
 
 
 @patch("et.task.workspaces.rename_all_workspaces")
@@ -786,7 +802,7 @@ def test_add_comment_uses_explicit_issue_key_without_resolving_workspace(
 def test_add_comment_raises_when_explicit_key_but_no_jira_config(mock_load_config):
     mock_load_config.return_value = _config(with_jira=False)
 
-    with pytest.raises(TaskError, match="no 'jira' block"):
+    with pytest.raises(JiraLogTimeError, match="no 'jira' block"):
         add_comment_to_current_workspace("Looks good", issue_key="ISD-99")
 
 
