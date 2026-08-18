@@ -13,6 +13,7 @@ from et.jira import (
     JiraError,
     JiraIssue,
     JiraSprint,
+    create_comment,
     create_issue,
     create_worklog,
     discover_board_id,
@@ -20,6 +21,7 @@ from et.jira import (
     fetch_active_sprint,
     fetch_bug_link_field_id,
     fetch_components,
+    fetch_issue_status,
     fetch_sprint_field_id,
     fetch_transitions,
     search_user_account_id,
@@ -391,6 +393,74 @@ def test_transition_issue_wraps_network_errors(mock_post):
         transition_issue(_config(), "PROJ-1", "11")
 
 
+# --- create_comment -----------------------------------------------------
+
+
+@patch("et.jira.requests.post")
+def test_create_comment_posts_body_as_adf_document(mock_post):
+    mock_post.return_value = _json_response(201, {"id": "10001"})
+    config = _config(base_url="https://example.atlassian.net")
+
+    result = create_comment(config, "PROJ-1", "Looks good to me")
+
+    assert result == {"id": "10001"}
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://example.atlassian.net/rest/api/3/issue/PROJ-1/comment"
+    assert kwargs["json"] == {"body": text_to_adf("Looks good to me")}
+    assert kwargs["auth"] == (config.email, config.pat)
+
+
+@patch("et.jira.requests.post")
+def test_create_comment_raises_on_non_2xx_status(mock_post):
+    mock_post.return_value = _json_response(400, {"errorMessages": ["bad request"]})
+
+    with pytest.raises(JiraError, match="400"):
+        create_comment(_config(), "PROJ-1", "a comment")
+
+
+@patch("et.jira.requests.post", side_effect=requests.ConnectionError("no route to host"))
+def test_create_comment_wraps_network_errors(mock_post):
+    with pytest.raises(JiraError, match="no route to host"):
+        create_comment(_config(), "PROJ-1", "a comment")
+
+
+# --- fetch_issue_status ---------------------------------------------------
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_status_returns_status_name(mock_get):
+    mock_get.return_value = _json_response(200, {"fields": {"status": {"name": "In Progress"}}})
+    config = _config(base_url="https://example.atlassian.net")
+
+    status = fetch_issue_status(config, "PROJ-1")
+
+    assert status == "In Progress"
+    args, kwargs = mock_get.call_args
+    assert args[0] == "https://example.atlassian.net/rest/api/3/issue/PROJ-1"
+    assert kwargs["params"] == {"fields": "status"}
+    assert kwargs["auth"] == (config.email, config.pat)
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_status_raises_when_no_status_in_response(mock_get):
+    mock_get.return_value = _json_response(200, {"fields": {}})
+
+    with pytest.raises(JiraError, match="no status name found"):
+        fetch_issue_status(_config(), "PROJ-1")
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_status_raises_on_non_200_status(mock_get):
+    mock_get.return_value = _json_response(404, {"errorMessages": ["not found"]})
+
+    with pytest.raises(JiraError, match="404"):
+        fetch_issue_status(_config(), "PROJ-1")
+
+
+@patch("et.jira.requests.get", side_effect=requests.ConnectionError("no route to host"))
+def test_fetch_issue_status_wraps_network_errors(mock_get):
+    with pytest.raises(JiraError, match="no route to host"):
+        fetch_issue_status(_config(), "PROJ-1")
 
 
 def test_text_to_adf_splits_paragraphs_on_blank_lines():

@@ -8,7 +8,11 @@ import pytest
 
 from et.config import EtConfig, JiraConfig, WorkspaceConfigEntry
 from et.jira import JiraError
-from et.jira_time import JiraLogTimeError, log_time_for_current_workspace
+from et.jira_time import (
+    JiraLogTimeError,
+    log_manual_time_for_current_workspace,
+    log_time_for_current_workspace,
+)
 from et.tracker import TrackerError
 from et.workspaces import WorkspaceError
 
@@ -195,3 +199,60 @@ def test_log_time_wraps_tracker_errors_on_reset(
 
     with pytest.raises(JiraLogTimeError, match="gsettings boom"):
         log_time_for_current_workspace()
+
+
+# --- log_manual_time_for_current_workspace --------------------------------
+
+
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.jira_time.load_config")
+def test_log_manual_time_logs_given_seconds_without_touching_tracker(
+    mock_load_config, mock_index, mock_create_worklog
+):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+
+    result = log_manual_time_for_current_workspace(7200, description="Manual entry")
+
+    assert result.workspace_index == 0
+    assert result.issue_key == "ISD-321"
+    assert result.seconds_logged == 7200
+    assert result.tracker_reset is False
+
+    mock_create_worklog.assert_called_once_with(
+        mock_load_config.return_value.jira, "ISD-321", 7200, comment="Manual entry"
+    )
+
+
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.jira_time.load_config")
+def test_log_manual_time_raises_when_no_jira_config(mock_load_config, mock_index):
+    mock_load_config.return_value = _config(with_jira=False)
+
+    with pytest.raises(JiraLogTimeError, match="no 'jira' block"):
+        log_manual_time_for_current_workspace(7200)
+
+
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.jira_time.load_config")
+def test_log_manual_time_raises_when_no_jira_issue_linked_to_workspace(
+    mock_load_config, mock_index
+):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="misc")])
+
+    with pytest.raises(JiraLogTimeError, match="no Jira issue linked to workspace 1"):
+        log_manual_time_for_current_workspace(7200)
+
+
+@patch("et.jira_time.create_worklog", side_effect=JiraError("boom"))
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.jira_time.load_config")
+def test_log_manual_time_wraps_jira_errors(mock_load_config, mock_index, mock_create_worklog):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+
+    with pytest.raises(JiraLogTimeError, match="boom"):
+        log_manual_time_for_current_workspace(7200)

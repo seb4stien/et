@@ -13,13 +13,15 @@ log time against them.
   this help.
 - **`et ws rename`** — rename the active workspace (or all of them from config).
 - **`et ws delete`** — delete the active (free) workspace, shifting later ones left.
-- **`et jira [start|create|log-time|complete]`** — a friendlier, task-centric
-  layer that creates a workspace + Tracker timer for a task (picked
-  straight from your active Jira issues, optionally moving it to "In
+- **`et jira [start|create|log-time|complete|comment|status]`** — a friendlier,
+  task-centric layer that creates a workspace + Tracker timer for a task
+  (picked straight from your active Jira issues, optionally moving it to "In
   Progress"), interactively creates new Jira issues (optionally pre-filled
-  from a GitHub issue/PR URL), and completes a task by logging its tracked
-  time to Jira and optionally freeing the slot and moving the issue to
-  "Done".
+  from a GitHub issue/PR URL), completes a task by logging its tracked time
+  to Jira and optionally freeing the slot and moving the issue to "Done",
+  adds a comment to the linked issue, and moves the linked issue through its
+  workflow (directly to "In Progress"/"Blocked", or interactively picked from
+  a numbered list of the team's workflow statuses).
 
 ## Requirements
 
@@ -127,6 +129,10 @@ et info                                      # (or bare `et`) show the active ta
 et jira start                                # pick an active Jira issue and start a task from it
 et jira create                               # interactively create a new Jira issue
 et jira log-time                             # log the active workspace's tracked time to Jira
+et jira log-time 2h                          # log a manually-specified 2h duration instead
+et jira comment "Looks good"                 # add a comment to the linked Jira issue
+et jira status in-progress                   # move the linked issue to "In Progress"
+et jira status                               # show current status, pick a new one from a numbered list
 et jira complete                             # log time, then optionally delete the workspace and close the issue
 ```
 
@@ -183,7 +189,21 @@ worklog via Jira's own worklog API (no separate Tempo credential needed —
 worklogs created this way still show up in Tempo timesheets when Tempo is
 configured to sync native Jira worklogs). At least a minute of elapsed time
 is required. On success the tracker is reset to 0, unless `--no-reset` is
-given.
+given. Given an `Xh` duration instead (e.g. `et jira log-time 2h` or `et
+jira log-time 1.5h`), that duration is logged manually rather than the
+Tracker timer's elapsed time — the Tracker timer isn't read or reset in
+that case (so `--no-reset` doesn't apply).
+
+`et jira comment [MESSAGE]` adds a comment to the Jira issue linked to the
+active workspace (or a different issue via `--key`/`-k KEY`). Prompts for
+the message if not given as an argument.
+
+`et jira status [in-progress|blocked]` moves the linked issue directly to
+"In Progress" or "Blocked" (applied immediately, no confirmation). With no
+argument, it shows the linked issue's current status and a numbered list of
+the team's workflow statuses (`Untriaged`, `Triaged`, `In Progress`,
+`Blocked`, `In Review`, `To Be Deployed`, `Done`, `Rejected`) to pick a new
+one from interactively; leave the prompt blank to cancel.
 
 `et jira complete` logs the active workspace's tracked time to Jira (like
 `et jira log-time`) and tells you how much it logged. It then asks whether
@@ -203,8 +223,8 @@ left in the middle of your workspaces. If only a single workspace remains
 
 ```yaml
 # Jira Cloud REST credentials + query. Required for `et jira start`
-# (Jira-issue picking), `et jira log-time`, `et jira complete`, and
-# `et jira create`.
+# (Jira-issue picking), `et jira log-time`, `et jira complete`,
+# `et jira comment`, `et jira status`, and `et jira create`.
 jira:
   base_url: https://your-org.atlassian.net
   email: you@example.com

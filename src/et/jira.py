@@ -1,5 +1,6 @@
 """Client for Jira Cloud's REST API, used to fetch the user's active issues
-and (for `et jira log-time`) to log work against an issue.
+and (for `et jira log-time`/`comment`/`status`) to log work, add comments,
+fetch/transition an issue's status.
 
 Talks to Jira Cloud's `/rest/api/3/search/jql` endpoint (the old
 `/rest/api/3/search` endpoint was retired by Atlassian and now returns HTTP
@@ -22,6 +23,7 @@ from et.config import JiraConfig
 SEARCH_PATH = "rest/api/3/search/jql"
 WORKLOG_PATH_TEMPLATE = "rest/api/3/issue/{key}/worklog"
 TRANSITIONS_PATH_TEMPLATE = "rest/api/3/issue/{key}/transitions"
+COMMENT_PATH_TEMPLATE = "rest/api/3/issue/{key}/comment"
 USER_SEARCH_PATH = "rest/api/3/user/search"
 MYSELF_PATH = "rest/api/3/myself"
 COMPONENTS_PATH_TEMPLATE = "rest/api/3/project/{key}/components"
@@ -360,6 +362,63 @@ def create_worklog(
         raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
 
     return payload_response
+
+
+def create_comment(jira_config: JiraConfig, issue_key: str, body: str) -> dict[str, object]:
+    """Add a comment to `issue_key` via Jira's own comment API.
+
+    Calls Jira's `POST /rest/api/3/issue/{key}/comment` endpoint with
+    `body` converted to Atlassian Document Format via `text_to_adf`.
+    Returns the created comment's raw JSON. Raises `JiraError` if the
+    request cannot be made or Jira rejects it.
+    """
+    url = jira_config.base_url.rstrip("/") + "/" + COMMENT_PATH_TEMPLATE.format(key=issue_key)
+
+    try:
+        response = requests.post(
+            url,
+            json={"body": text_to_adf(body)},
+            auth=(jira_config.email, jira_config.pat),
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
+
+    if response.status_code not in (200, 201):
+        raise JiraError(
+            f"Jira API request to {url} failed with status {response.status_code}: "
+            f"{response.text.strip()[:500]}"
+        )
+
+    try:
+        payload_response = response.json()
+    except ValueError as exc:
+        raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+
+    if not isinstance(payload_response, dict):
+        raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
+
+    return payload_response
+
+
+def fetch_issue_status(jira_config: JiraConfig, issue_key: str) -> str:
+    """Return `issue_key`'s current workflow status name.
+
+    Calls Jira's `GET /rest/api/3/issue/{key}?fields=status` endpoint.
+    Raises `JiraError` if the request cannot be made, Jira rejects it, or
+    the response has no usable status name.
+    """
+    url = _jira_url(jira_config, f"{ISSUE_PATH}/{issue_key}")
+    payload = _get_json(jira_config, url, params={"fields": "status"})
+    if not isinstance(payload, dict):
+        raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
+
+    fields = payload.get("fields")
+    status_field = fields.get("status") if isinstance(fields, dict) else None
+    name = status_field.get("name") if isinstance(status_field, dict) else None
+    if not isinstance(name, str) or not name:
+        raise JiraError(f"unexpected Jira API response from {url}: no status name found")
+    return name
 
 
 def _fetch_issue_pages(jira_config: JiraConfig, url: str) -> list[object]:

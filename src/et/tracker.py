@@ -229,3 +229,24 @@ def format_duration(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours}h {minutes}m {secs}s"
+
+
+_HOURS_DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[hH]\s*$")
+
+
+def parse_hours_to_seconds(text: str) -> int:
+    """Parse an hours-only duration like "2h" or "1.5h" into whole seconds.
+
+    Used for `et jira log-time`'s manual duration argument. Raises
+    `ValueError` if `text` isn't a positive number followed by "h" (e.g.
+    missing the "h" suffix, non-numeric, zero, or negative).
+    """
+    match = _HOURS_DURATION_RE.match(text)
+    if match is None:
+        raise ValueError(f"invalid duration {text!r}: expected a format like '2h' or '1.5h'")
+
+    hours = float(match.group(1))
+    if hours <= 0:
+        raise ValueError(f"invalid duration {text!r}: must be greater than 0h")
+
+    return round(hours * 3600)

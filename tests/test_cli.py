@@ -551,6 +551,39 @@ def test_jira_log_time_logs_and_reports_duration(mock_log_time, mock_load_config
     mock_log_time.assert_called_once_with(description="note", reset=True)
 
 
+@patch("et.cli.load_config")
+@patch("et.cli.log_manual_time_for_current_workspace")
+def test_jira_log_time_with_hours_argument_logs_manual_duration(
+    mock_log_manual, mock_load_config
+):
+    mock_log_manual.return_value = LogTimeResult(
+        workspace_index=1, issue_key="ISD-321", seconds_logged=7200, tracker_reset=False
+    )
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "log-time", "2h", "--comment", "manual"])
+
+    assert result.exit_code == 0
+    assert "Logged 2h 0m 0s to jira:ISD-321 (workspace 2)" in result.stdout
+    assert "Reset tracker to 0" not in result.stdout
+    mock_log_manual.assert_called_once_with(7200, description="manual")
+
+
+def test_jira_log_time_with_invalid_hours_argument_reports_error():
+    result = runner.invoke(app, ["jira", "log-time", "2m"])
+
+    assert result.exit_code == 1
+    assert "Error: invalid duration" in result.output
+
+
+def test_jira_log_time_rejects_no_reset_combined_with_manual_hours():
+    result = runner.invoke(app, ["jira", "log-time", "2h", "--no-reset"])
+
+    assert result.exit_code == 1
+    assert "--no-reset only applies" in result.output
+
+
 @patch("et.cli.complete_task_for_current_workspace")
 def test_jira_complete_logs_time_and_frees_workspace(mock_complete):
     def fake_complete(comment, on_logged, confirm_delete, confirm_done):
@@ -639,6 +672,156 @@ def test_jira_complete_reports_error(mock_complete):
     mock_complete.side_effect = JiraLogTimeError("no Jira issue linked to workspace 1")
 
     result = runner.invoke(app, ["jira", "complete"])
+
+    assert result.exit_code == 1
+    assert "Error: no Jira issue linked to workspace 1" in result.output
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.add_comment_to_current_workspace")
+def test_jira_comment_adds_comment_from_argument(mock_add_comment, mock_load_config):
+    mock_add_comment.return_value = "ISD-321"
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "comment", "Looks good"])
+
+    assert result.exit_code == 0
+    assert "Added comment to ISD-321" in result.stdout
+    mock_add_comment.assert_called_once_with("Looks good", issue_key=None)
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.add_comment_to_current_workspace")
+def test_jira_comment_prompts_when_message_not_given(mock_add_comment, mock_load_config):
+    mock_add_comment.return_value = "ISD-321"
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "comment"], input="Prompted comment\n")
+
+    assert result.exit_code == 0
+    mock_add_comment.assert_called_once_with("Prompted comment", issue_key=None)
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.add_comment_to_current_workspace")
+def test_jira_comment_forwards_explicit_key(mock_add_comment, mock_load_config):
+    mock_add_comment.return_value = "ISD-99"
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "comment", "hi", "--key", "ISD-99"])
+
+    assert result.exit_code == 0
+    mock_add_comment.assert_called_once_with("hi", issue_key="ISD-99")
+
+
+@patch("et.cli.add_comment_to_current_workspace")
+def test_jira_comment_reports_error(mock_add_comment):
+    mock_add_comment.side_effect = JiraLogTimeError("no Jira issue linked to workspace 1")
+
+    result = runner.invoke(app, ["jira", "comment", "hi"])
+
+    assert result.exit_code == 1
+    assert "Error: no Jira issue linked to workspace 1" in result.output
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.set_status_for_current_workspace")
+def test_jira_status_with_in_progress_argument_transitions_immediately(
+    mock_set_status, mock_load_config
+):
+    mock_set_status.return_value = "ISD-321"
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "status", "in-progress"])
+
+    assert result.exit_code == 0
+    assert "Moved ISD-321 to 'In Progress'" in result.stdout
+    mock_set_status.assert_called_once_with("in progress")
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.set_status_for_current_workspace")
+def test_jira_status_with_blocked_argument_transitions_immediately(
+    mock_set_status, mock_load_config
+):
+    mock_set_status.return_value = "ISD-321"
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "status", "blocked"])
+
+    assert result.exit_code == 0
+    assert "Moved ISD-321 to 'Blocked'" in result.stdout
+    mock_set_status.assert_called_once_with("blocked")
+
+
+def test_jira_status_rejects_unknown_argument():
+    result = runner.invoke(app, ["jira", "status", "done"])
+
+    assert result.exit_code == 1
+    assert "status must be one of" in result.output
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.set_status_for_current_workspace")
+@patch("et.cli.get_current_status_for_current_workspace")
+def test_jira_status_with_no_argument_shows_numbered_list_and_transitions_on_choice(
+    mock_get_status, mock_set_status, mock_load_config
+):
+    mock_get_status.return_value = ("ISD-321", "In Progress")
+    mock_set_status.return_value = "ISD-321"
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "status"], input="4\n")
+
+    assert result.exit_code == 0
+    assert "ISD-321 is currently: In Progress" in result.stdout
+    assert "1. Untriaged" in result.stdout
+    assert "4. Blocked" in result.stdout
+    assert "Moved ISD-321 to 'Blocked'" in result.stdout
+    mock_set_status.assert_called_once_with("Blocked")
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.set_status_for_current_workspace")
+@patch("et.cli.get_current_status_for_current_workspace")
+def test_jira_status_with_no_argument_cancels_on_blank_input(
+    mock_get_status, mock_set_status, mock_load_config
+):
+    mock_get_status.return_value = ("ISD-321", "In Progress")
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "status"], input="\n")
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.stdout
+    mock_set_status.assert_not_called()
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.get_current_status_for_current_workspace")
+def test_jira_status_with_no_argument_rejects_invalid_choice(mock_get_status, mock_load_config):
+    mock_get_status.return_value = ("ISD-321", "In Progress")
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "status"], input="99\n")
+
+    assert result.exit_code == 1
+    assert "Error: invalid choice" in result.output
+
+
+@patch("et.cli.get_current_status_for_current_workspace")
+def test_jira_status_reports_error(mock_get_status):
+    mock_get_status.side_effect = JiraLogTimeError("no Jira issue linked to workspace 1")
+
+    result = runner.invoke(app, ["jira", "status"])
 
     assert result.exit_code == 1
     assert "Error: no Jira issue linked to workspace 1" in result.output

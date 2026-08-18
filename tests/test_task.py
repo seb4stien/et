@@ -10,10 +10,16 @@ from et.config import ConfigError, EtConfig, JiraConfig, WorkspaceConfigEntry
 from et.jira import JiraError, JiraIssue, JiraTransition
 from et.jira_time import JiraLogTimeError, LogTimeResult
 from et.task import (
+    BLOCKED_STATUS,
+    IN_PROGRESS_STATUS,
+    STATUS_WORKFLOW_ORDER,
     TaskError,
+    add_comment_to_current_workspace,
     complete_task_for_current_workspace,
     create_task_from_jira,
     create_task_workspace,
+    get_current_status_for_current_workspace,
+    set_status_for_current_workspace,
 )
 from et.tracker import TrackerError
 from et.workspaces import WorkspaceError
@@ -645,3 +651,172 @@ def test_complete_task_raises_when_no_done_transition_available(
         complete_task_for_current_workspace(confirm_done=lambda _result: True)
 
     mock_transition_issue.assert_not_called()
+
+
+# --- set_status_for_current_workspace --------------------------------------
+
+
+@patch("et.task.transition_issue")
+@patch("et.task.fetch_transitions")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_set_status_moves_issue_to_in_progress(
+    mock_load_config, _mock_index, mock_fetch_transitions, mock_transition_issue
+):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
+    mock_fetch_transitions.return_value = [
+        JiraTransition(id="21", name="Start progress", to_status="In Progress"),
+    ]
+
+    issue_key = set_status_for_current_workspace(IN_PROGRESS_STATUS)
+
+    assert issue_key == "ISD-2"
+    mock_transition_issue.assert_called_once_with(_config().jira, "ISD-2", "21")
+
+
+@patch("et.task.transition_issue")
+@patch("et.task.fetch_transitions")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_set_status_moves_issue_to_blocked(
+    mock_load_config, _mock_index, mock_fetch_transitions, mock_transition_issue
+):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
+    mock_fetch_transitions.return_value = [
+        JiraTransition(id="41", name="Block", to_status="Blocked"),
+    ]
+
+    issue_key = set_status_for_current_workspace(BLOCKED_STATUS)
+
+    assert issue_key == "ISD-2"
+    mock_transition_issue.assert_called_once_with(_config().jira, "ISD-2", "41")
+
+
+@patch("et.task.fetch_transitions")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_set_status_raises_when_no_matching_transition(
+    mock_load_config, _mock_index, mock_fetch_transitions
+):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
+    mock_fetch_transitions.return_value = []
+
+    with pytest.raises(TaskError, match="no transition to 'blocked' available"):
+        set_status_for_current_workspace(BLOCKED_STATUS)
+
+
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_set_status_raises_when_no_issue_linked_to_workspace(mock_load_config, _mock_index):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="misc")])
+
+    with pytest.raises(JiraLogTimeError, match="no Jira issue linked to workspace 1"):
+        set_status_for_current_workspace(IN_PROGRESS_STATUS)
+
+
+# --- get_current_status_for_current_workspace ------------------------------
+
+
+@patch("et.task.fetch_issue_status")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_get_current_status_returns_issue_key_and_status(
+    mock_load_config, _mock_index, mock_fetch_status
+):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
+    mock_fetch_status.return_value = "In Progress"
+
+    issue_key, status = get_current_status_for_current_workspace()
+
+    assert issue_key == "ISD-2"
+    assert status == "In Progress"
+    mock_fetch_status.assert_called_once_with(_config().jira, "ISD-2")
+
+
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_get_current_status_raises_when_no_issue_linked(mock_load_config, _mock_index):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="misc")])
+
+    with pytest.raises(JiraLogTimeError, match="no Jira issue linked to workspace 1"):
+        get_current_status_for_current_workspace()
+
+
+@patch("et.task.fetch_issue_status", side_effect=JiraError("boom"))
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_get_current_status_wraps_jira_errors(mock_load_config, _mock_index, _mock_fetch_status):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
+
+    with pytest.raises(TaskError, match="boom"):
+        get_current_status_for_current_workspace()
+
+
+# --- add_comment_to_current_workspace ---------------------------------------
+
+
+@patch("et.task.create_comment")
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_add_comment_resolves_issue_from_active_workspace(
+    mock_load_config, _mock_index, mock_create_comment
+):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
+
+    issue_key = add_comment_to_current_workspace("Looks good")
+
+    assert issue_key == "ISD-2"
+    mock_create_comment.assert_called_once_with(_config().jira, "ISD-2", "Looks good")
+
+
+@patch("et.task.create_comment")
+@patch("et.task.load_config")
+def test_add_comment_uses_explicit_issue_key_without_resolving_workspace(
+    mock_load_config, mock_create_comment
+):
+    mock_load_config.return_value = _config()
+
+    issue_key = add_comment_to_current_workspace("Looks good", issue_key="ISD-99")
+
+    assert issue_key == "ISD-99"
+    mock_create_comment.assert_called_once_with(_config().jira, "ISD-99", "Looks good")
+
+
+@patch("et.task.load_config")
+def test_add_comment_raises_when_explicit_key_but_no_jira_config(mock_load_config):
+    mock_load_config.return_value = _config(with_jira=False)
+
+    with pytest.raises(TaskError, match="no 'jira' block"):
+        add_comment_to_current_workspace("Looks good", issue_key="ISD-99")
+
+
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_add_comment_raises_when_no_issue_linked_to_workspace(mock_load_config, _mock_index):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="misc")])
+
+    with pytest.raises(JiraLogTimeError, match="no Jira issue linked to workspace 1"):
+        add_comment_to_current_workspace("Looks good")
+
+
+@patch("et.task.create_comment", side_effect=JiraError("boom"))
+@patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
+@patch("et.task.load_config")
+def test_add_comment_wraps_jira_errors(mock_load_config, _mock_index, _mock_create_comment):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
+
+    with pytest.raises(TaskError, match="boom"):
+        add_comment_to_current_workspace("Looks good")
+
+
+def test_status_workflow_order_matches_expected_sequence():
+    assert STATUS_WORKFLOW_ORDER == [
+        "Untriaged",
+        "Triaged",
+        "In Progress",
+        "Blocked",
+        "In Review",
+        "To Be Deployed",
+        "Done",
+        "Rejected",
+    ]

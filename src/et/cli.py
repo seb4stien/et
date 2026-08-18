@@ -17,13 +17,30 @@ from et.jira_create import (
     create_issue_interactive,
 )
 from et.jira_ref import jira_key_from_ref
-from et.jira_time import JiraLogTimeError, LogTimeResult, log_time_for_current_workspace
+from et.jira_time import (
+    JiraLogTimeError,
+    LogTimeResult,
+    log_manual_time_for_current_workspace,
+    log_time_for_current_workspace,
+)
 from et.task import (
+    BLOCKED_STATUS,
+    IN_PROGRESS_STATUS,
+    STATUS_WORKFLOW_ORDER,
     TaskError,
+    add_comment_to_current_workspace,
     complete_task_for_current_workspace,
     create_task_from_jira,
+    get_current_status_for_current_workspace,
+    set_status_for_current_workspace,
 )
-from et.tracker import TrackerError, find_timer_for_workspace, format_duration, load_timers
+from et.tracker import (
+    TrackerError,
+    find_timer_for_workspace,
+    format_duration,
+    load_timers,
+    parse_hours_to_seconds,
+)
 from et.workspaces import (
     WorkspaceError,
     get_active_workspace_index,
@@ -590,27 +607,48 @@ def jira_create(
 
 @jira_app.command("log-time")
 def jira_log_time(
+    hours: str | None = typer.Argument(
+        None,
+        metavar="[Xh]",
+        help='Manually log this many hours (e.g. "2h" or "1.5h") instead of reading the '
+        "Tracker timer's elapsed time.",
+    ),
     comment: str | None = typer.Option(
         None, "--comment", "-m", help="Worklog description/comment to attach in Jira."
     ),
     no_reset: bool = typer.Option(
         False,
         "--no-reset",
-        help="Don't reset the tracker after logging (leaves its elapsed time as-is).",
+        help="Don't reset the tracker after logging (leaves its elapsed time as-is). "
+        "Only meaningful without a manual [Xh] duration.",
     ),
 ) -> None:
     """Log the active task's tracked time to its Jira issue.
 
-    Reads the elapsed time from the ET-<n> Tracker timer bound to the
-    active workspace, resolves the Jira issue linked to that workspace,
-    and logs it as a Jira worklog for that issue (via Jira's own worklog
-    API, which also shows up in Tempo timesheets when Tempo is configured
-    to sync native Jira worklogs). The tracker is reset to 0 afterwards,
-    unless --no-reset is given.
+    With no argument, reads the elapsed time from the ET-<n> Tracker timer
+    bound to the active workspace, logs it as a Jira worklog for the linked
+    issue (via Jira's own worklog API, which also shows up in Tempo
+    timesheets when Tempo is configured to sync native Jira worklogs), and
+    resets the tracker to 0 afterwards (unless --no-reset is given).
+
+    Given an [Xh] duration (e.g. "et jira log-time 2h"), logs that duration
+    instead, without reading or resetting the Tracker timer at all.
     """
+    if hours is not None and no_reset:
+        typer.echo(
+            "Error: --no-reset only applies when logging the Tracker timer's elapsed "
+            "time, not a manual [Xh] duration",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     try:
-        result = log_time_for_current_workspace(description=comment, reset=not no_reset)
-    except (ConfigError, WorkspaceError, JiraLogTimeError) as error:
+        if hours is not None:
+            seconds = parse_hours_to_seconds(hours)
+            result = log_manual_time_for_current_workspace(seconds, description=comment)
+        else:
+            result = log_time_for_current_workspace(description=comment, reset=not no_reset)
+    except (ConfigError, WorkspaceError, JiraLogTimeError, ValueError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
 
@@ -667,3 +705,87 @@ def jira_complete(
         typer.echo(f"Deleted workspace {workspace_number}")
     if result.moved_to_done:
         typer.echo(f"Moved {_jira_key_link(result.log_result.issue_key)} to 'Done'")
+
+
+@jira_app.command("comment")
+def jira_comment(
+    message: str | None = typer.Argument(
+        None, help="Comment text to add to the Jira issue."
+    ),
+    key: str | None = typer.Option(
+        None,
+        "--key",
+        "-k",
+        help="Jira issue key to comment on, instead of the active workspace's linked issue.",
+    ),
+) -> None:
+    """Add a comment to the current task's linked Jira issue.
+
+    Defaults to the Jira issue linked to the active workspace; pass --key
+    to comment on a different issue instead. Prompts for the message if not
+    given as an argument.
+    """
+    if message is None:
+        message = typer.prompt("Comment")
+
+    try:
+        issue_key = add_comment_to_current_workspace(message, issue_key=key)
+    except (ConfigError, WorkspaceError, JiraLogTimeError, TaskError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    typer.echo(f"Added comment to {_jira_key_link(issue_key)}")
+
+
+# Direct-argument shortcuts for `et jira status`: CLI-facing value -> the
+# internal target status string `set_status_for_current_workspace` expects.
+_STATUS_SHORTCUTS = {"in-progress": IN_PROGRESS_STATUS, "blocked": BLOCKED_STATUS}
+_STATUS_LABELS = {"in-progress": "In Progress", "blocked": "Blocked"}
+
+
+@jira_app.command("status")
+def jira_status(
+    status: str | None = typer.Argument(
+        None,
+        help='Target status: "in-progress" or "blocked". Omit to pick interactively from '
+        "the full workflow list.",
+    ),
+) -> None:
+    """Move the active task's linked Jira issue to a new status.
+
+    Given "in-progress" or "blocked", transitions the linked issue
+    immediately (no confirmation). With no argument, shows the ticket's
+    current status and a numbered list of the team's workflow statuses
+    (Untriaged through Done/Rejected) to choose from.
+    """
+    try:
+        if status is not None:
+            normalized = status.strip().lower()
+            if normalized not in _STATUS_SHORTCUTS:
+                choices = ", ".join(_STATUS_SHORTCUTS)
+                typer.echo(f"Error: status must be one of: {choices}", err=True)
+                raise typer.Exit(code=1)
+            issue_key = set_status_for_current_workspace(_STATUS_SHORTCUTS[normalized])
+            typer.echo(f"Moved {_jira_key_link(issue_key)} to '{_STATUS_LABELS[normalized]}'")
+            return
+
+        issue_key, current_status = get_current_status_for_current_workspace()
+        typer.echo(f"{_jira_key_link(issue_key)} is currently: {current_status}")
+        for index, name in enumerate(STATUS_WORKFLOW_ORDER, start=1):
+            typer.echo(f"  {index}. {name}")
+
+        choice = typer.prompt("Choose a status (blank to cancel)", default="", show_default=False)
+        choice = choice.strip()
+        if not choice:
+            typer.echo("Cancelled.")
+            return
+        if not choice.isdigit() or not (1 <= int(choice) <= len(STATUS_WORKFLOW_ORDER)):
+            typer.echo("Error: invalid choice", err=True)
+            raise typer.Exit(code=1)
+
+        target_status = STATUS_WORKFLOW_ORDER[int(choice) - 1]
+        issue_key = set_status_for_current_workspace(target_status)
+        typer.echo(f"Moved {_jira_key_link(issue_key)} to '{target_status}'")
+    except (ConfigError, WorkspaceError, JiraLogTimeError, TaskError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
