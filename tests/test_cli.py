@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 from et.cli import _hyperlink, app
 from et.config import EtConfig, JiraConfig, WorkspaceConfigEntry
 from et.jira import JiraIssue
-from et.jira_time import JiraLogTimeError, LogTimeResult
+from et.jira_time import AllLogTimeResult, JiraLogTimeError, LogTimeResult, SkippedWorkspace
 from et.task import TaskCompleteResult, TaskCreateResult, TaskError
 from et.tracker import TrackerError
 from et.workspaces import WorkspaceError
@@ -598,6 +598,86 @@ def test_jira_log_time_rejects_no_reset_combined_with_manual_hours():
 
     assert result.exit_code == 1
     assert "--no-reset only applies" in result.output
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [["2h"], ["--comment", "note"], ["--jira", "ISD-999"]],
+)
+def test_jira_log_time_all_rejects_incompatible_options(extra_args):
+    result = runner.invoke(app, ["jira", "log-time", "--all", *extra_args])
+
+    assert result.exit_code == 1
+    assert "--all can't be combined with" in result.output
+
+
+@patch("et.cli._hyperlink", side_effect=lambda text, url: f"<{url}|{text}>")
+@patch("et.cli.load_config")
+@patch("et.cli.log_time_for_all_workspaces")
+def test_jira_log_time_all_reports_logged_and_skipped_workspaces(
+    mock_log_all, mock_load_config, mock_hyperlink
+):
+    mock_log_all.return_value = AllLogTimeResult(
+        logged=[
+            LogTimeResult(
+                workspace_index=0, issue_key="ISD-321", seconds_logged=3600, tracker_reset=True
+            )
+        ],
+        skipped=[
+            SkippedWorkspace(
+                workspace_index=2, issue_key="ISD-654", reason="only 10s elapsed (minimum 60s)"
+            )
+        ],
+    )
+    mock_load_config.return_value = _config([])
+
+    result = runner.invoke(app, ["jira", "log-time", "--all"])
+
+    assert result.exit_code == 0
+    mock_log_all.assert_called_once_with(reset=True)
+    assert "Logged 1h 0m 0s to <https://example.atlassian.net/browse/ISD-321|jira:ISD-321>" in (
+        result.stdout
+    )
+    assert "Reset tracker to 0" in result.stdout
+    assert (
+        "Skipped workspace 3 (<https://example.atlassian.net/browse/ISD-654|jira:ISD-654>): "
+        "only 10s elapsed (minimum 60s)" in result.stdout
+    )
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.log_time_for_all_workspaces")
+def test_jira_log_time_all_reports_no_linked_workspaces(mock_log_all, mock_load_config):
+    mock_log_all.return_value = AllLogTimeResult(logged=[], skipped=[])
+    mock_load_config.return_value = _config([])
+
+    result = runner.invoke(app, ["jira", "log-time", "--all"])
+
+    assert result.exit_code == 0
+    assert "No workspaces with a linked Jira issue found." in result.stdout
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.log_time_for_all_workspaces")
+def test_jira_log_time_all_forwards_no_reset(mock_log_all, mock_load_config):
+    mock_log_all.return_value = AllLogTimeResult(logged=[], skipped=[])
+    mock_load_config.return_value = _config([])
+
+    result = runner.invoke(app, ["jira", "log-time", "--all", "--no-reset"])
+
+    assert result.exit_code == 0
+    mock_log_all.assert_called_once_with(reset=False)
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.log_time_for_all_workspaces", side_effect=JiraLogTimeError("no 'jira' block"))
+def test_jira_log_time_all_reports_error(mock_log_all, mock_load_config):
+    mock_load_config.return_value = _config([])
+
+    result = runner.invoke(app, ["jira", "log-time", "--all"])
+
+    assert result.exit_code == 1
+    assert "Error: no 'jira' block" in result.output
 
 
 @patch("et.cli.complete_task_for_current_workspace")

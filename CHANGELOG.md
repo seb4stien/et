@@ -22,6 +22,11 @@ All notable changes to `et` are documented here. Format loosely follows
 - `et jira log-time [Xh]`: log a manually-specified duration (e.g. `2h`,
   `1.5h`) to the linked Jira issue instead of reading the Tracker timer's
   elapsed time.
+- `et jira log-time --all`: log every workspace with a linked Jira issue
+  (not just the active one) in a single run, each to its own issue, without
+  switching GNOME workspaces. Workspaces with too little tracked time, no
+  Tracker timer, or a failing Jira call are skipped and reported instead of
+  aborting the rest.
 - `et jira status [in-progress|blocked]`: move the linked Jira issue
   directly to "In Progress" or "Blocked". With no argument, shows the
   issue's current status and a numbered list of the team's workflow

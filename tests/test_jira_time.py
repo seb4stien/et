@@ -11,6 +11,7 @@ from et.jira import JiraError
 from et.jira_time import (
     JiraLogTimeError,
     log_manual_time_for_current_workspace,
+    log_time_for_all_workspaces,
     log_time_for_current_workspace,
     resolve_issue_key,
 )
@@ -333,3 +334,158 @@ def test_resolve_issue_key_falls_back_to_active_workspace_without_override(mock_
     assert resolved_key == "ISD-321"
     assert jira_config is config.jira
     mock_index.assert_called_once()
+
+
+# --- log_time_for_all_workspaces -------------------------------------------
+
+
+@patch("et.jira_time.tracker.save_timers_with_reload")
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.tracker.load_timers")
+@patch("et.jira_time.load_config")
+def test_log_all_logs_and_resets_every_linked_workspace(
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+):
+    mock_load_config.return_value = _config(
+        [
+            WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321"),
+            WorkspaceConfigEntry(name="misc"),
+            WorkspaceConfigEntry(name="ISD-654", ref="jira:ISD-654"),
+        ]
+    )
+    mock_load_timers.return_value = [_timer(0, 3600), _timer(2, 1800, name="ET-3")]
+
+    result = log_time_for_all_workspaces(description="Weekly sync")
+
+    assert [r.issue_key for r in result.logged] == ["ISD-321", "ISD-654"]
+    assert [r.seconds_logged for r in result.logged] == [3600, 1800]
+    assert all(r.tracker_reset for r in result.logged)
+    assert result.skipped == []
+
+    assert mock_create_worklog.call_count == 2
+    mock_create_worklog.assert_any_call(
+        mock_load_config.return_value.jira, "ISD-321", 3600, comment="Weekly sync"
+    )
+    mock_create_worklog.assert_any_call(
+        mock_load_config.return_value.jira, "ISD-654", 1800, comment="Weekly sync"
+    )
+    # One save per successfully-logged workspace, not batched.
+    assert mock_save_timers.call_count == 2
+
+
+@patch("et.jira_time.tracker.save_timers_with_reload")
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.tracker.load_timers")
+@patch("et.jira_time.load_config")
+def test_log_all_skips_workspace_below_minimum_elapsed(
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+    mock_load_timers.return_value = [_timer(0, 10)]
+
+    result = log_time_for_all_workspaces()
+
+    assert result.logged == []
+    assert len(result.skipped) == 1
+    assert result.skipped[0].workspace_index == 0
+    assert result.skipped[0].issue_key == "ISD-321"
+    assert "only 10s elapsed" in result.skipped[0].reason
+    mock_create_worklog.assert_not_called()
+    mock_save_timers.assert_not_called()
+
+
+@patch("et.jira_time.tracker.save_timers_with_reload")
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.tracker.load_timers", return_value=[])
+@patch("et.jira_time.load_config")
+def test_log_all_skips_workspace_with_no_timer(
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+
+    result = log_time_for_all_workspaces()
+
+    assert result.logged == []
+    assert result.skipped[0].reason == "no Tracker timer for this workspace"
+    mock_create_worklog.assert_not_called()
+    mock_save_timers.assert_not_called()
+
+
+@patch("et.jira_time.tracker.save_timers_with_reload")
+@patch("et.jira_time.create_worklog", side_effect=JiraError("boom"))
+@patch("et.jira_time.tracker.load_timers")
+@patch("et.jira_time.load_config")
+def test_log_all_skips_workspace_whose_jira_call_fails_but_logs_the_rest(
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+):
+    mock_load_config.return_value = _config(
+        [
+            WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321"),
+            WorkspaceConfigEntry(name="ISD-654", ref="jira:ISD-654"),
+        ]
+    )
+    timers = [_timer(0, 3600), _timer(1, 1800, name="ET-2")]
+    mock_load_timers.return_value = timers
+
+    def create_worklog_side_effect(_jira_config, key, *_args, **_kwargs):
+        if key == "ISD-321":
+            raise JiraError("boom")
+
+    mock_create_worklog.side_effect = create_worklog_side_effect
+
+    result = log_time_for_all_workspaces()
+
+    assert [s.issue_key for s in result.skipped] == ["ISD-321"]
+    assert result.skipped[0].reason == "boom"
+    assert [r.issue_key for r in result.logged] == ["ISD-654"]
+    # The failed workspace's timer must be left untouched.
+    assert timers[0]["timeElapsed"] == 3600
+    mock_save_timers.assert_called_once()
+
+
+@patch("et.jira_time.load_config")
+def test_log_all_raises_when_no_jira_config(mock_load_config):
+    mock_load_config.return_value = _config(with_jira=False)
+
+    with pytest.raises(JiraLogTimeError, match="no 'jira' block"):
+        log_time_for_all_workspaces()
+
+
+@patch("et.jira_time.tracker.save_timers_with_reload")
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.tracker.load_timers", return_value=[])
+@patch("et.jira_time.load_config")
+def test_log_all_ignores_workspaces_with_no_linked_issue(
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="misc"), WorkspaceConfigEntry(name="static", type="static")]
+    )
+
+    result = log_time_for_all_workspaces()
+
+    assert result.logged == []
+    assert result.skipped == []
+    mock_create_worklog.assert_not_called()
+
+
+@patch("et.jira_time.tracker.save_timers_with_reload")
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.tracker.load_timers")
+@patch("et.jira_time.load_config")
+def test_log_all_does_not_reset_when_disabled(
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+    mock_load_timers.return_value = [_timer(0, 3600)]
+
+    result = log_time_for_all_workspaces(reset=False)
+
+    assert result.logged[0].tracker_reset is False
+    mock_save_timers.assert_not_called()

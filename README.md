@@ -134,6 +134,7 @@ et jira start                                # pick an active Jira issue and sta
 et jira create                               # interactively create a new Jira issue
 et jira log-time                             # log the active workspace's tracked time to Jira
 et jira log-time 2h                          # log a manually-specified 2h duration instead
+et jira log-time --all                       # log every workspace with a linked Jira issue, not just the active one
 et jira comment "Looks good"                 # add a comment to the linked Jira issue
 et jira status in-progress                   # move the linked issue to "In Progress"
 et jira status                               # show current status, pick a new one from a numbered list
@@ -197,6 +198,18 @@ given. Given an `Xh` duration instead (e.g. `et jira log-time 2h` or `et
 jira log-time 1.5h`), that duration is logged manually rather than the
 Tracker timer's elapsed time — the Tracker timer isn't read or reset in
 that case (so `--no-reset` doesn't apply).
+
+`et jira log-time --all` logs every workspace in the `workspaces` config
+list that has a linked Jira issue, instead of only the active one —
+useful for logging a whole day's tracked time across every task at once
+without switching between workspaces. Each linked workspace's own Tracker
+timer is logged to its own issue and reset immediately on success (or left
+untouched otherwise); a workspace with less than a minute of elapsed time,
+no Tracker timer at all, or a failing Jira call is skipped (reported at the
+end) rather than stopping the rest from being logged. `--no-reset` still
+applies (to every workspace logged in that run), but `--all` can't be
+combined with an `Xh` duration, `--comment/-m`, or `-j/--jira`, since those
+only make sense for a single workspace/issue.
 
 `et jira comment [MESSAGE]` adds a comment to the Jira issue linked to the
 active workspace (or a different issue via `-j/--jira KEY`). Prompts for
