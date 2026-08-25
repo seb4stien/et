@@ -26,6 +26,7 @@ from et.jira_time import (
     JiraLogTimeError,
     LogTimeResult,
     log_manual_time_for_current_workspace,
+    log_time_for_all_workspaces,
     log_time_for_current_workspace,
     resolve_issue_key,
 )
@@ -649,6 +650,12 @@ def jira_log_time(
         help="Don't reset the tracker after logging (leaves its elapsed time as-is). "
         "Only meaningful without a manual [Xh] duration.",
     ),
+    all_workspaces: bool = typer.Option(
+        False,
+        "--all",
+        help="Log every workspace with a linked Jira issue (not just the active one), "
+        "instead of a single workspace/issue.",
+    ),
     jira_key: str | None = _jira_key_option(),
 ) -> None:
     """Log the active task's tracked time to its Jira issue.
@@ -661,6 +668,12 @@ def jira_log_time(
 
     Given an [Xh] duration (e.g. "et jira log-time 2h"), logs that duration
     instead, without reading or resetting the Tracker timer at all.
+
+    With --all, loops over every workspace in the config's `workspaces`
+    list that has a linked Jira issue (not just the active one) and logs
+    each one's own Tracker timer to its own issue, without switching GNOME
+    workspaces. Can't be combined with [Xh], --comment/-m, or -j/--jira,
+    which only make sense for a single workspace/issue.
     """
     if hours is not None and no_reset:
         typer.echo(
@@ -669,6 +682,40 @@ def jira_log_time(
             err=True,
         )
         raise typer.Exit(code=1)
+
+    if all_workspaces:
+        if hours is not None or comment is not None or jira_key is not None:
+            typer.echo(
+                "Error: --all can't be combined with [Xh], --comment/-m, or -j/--jira "
+                "(they only apply to a single workspace/issue)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        try:
+            all_results = log_time_for_all_workspaces(reset=not no_reset)
+        except (ConfigError, JiraLogTimeError) as error:
+            typer.echo(f"Error: {error}", err=True)
+            raise typer.Exit(code=1) from error
+
+        if not all_results.logged and not all_results.skipped:
+            typer.echo("No workspaces with a linked Jira issue found.")
+            return
+
+        for logged in all_results.logged:
+            duration = format_duration(logged.seconds_logged)
+            typer.echo(
+                f"Logged {duration} to {_jira_ref_link(logged.issue_key)} "
+                f"(workspace {logged.workspace_index + 1})"
+            )
+            if logged.tracker_reset:
+                typer.echo("Reset tracker to 0")
+        for skipped in all_results.skipped:
+            typer.echo(
+                f"Skipped workspace {skipped.workspace_index + 1} "
+                f"({_jira_ref_link(skipped.issue_key)}): {skipped.reason}"
+            )
+        return
 
     try:
         if hours is not None:
@@ -878,4 +925,3 @@ def git_create_branch(jira_key: str | None = _jira_key_option()) -> None:
     typer.echo(
         f"Created and switched to branch '{result.name}' for {_jira_key_link(result.issue_key)}"
     )
-
