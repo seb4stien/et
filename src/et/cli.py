@@ -38,6 +38,7 @@ from et.task import (
     add_comment_to_current_workspace,
     complete_task_for_current_workspace,
     create_task_from_jira,
+    create_task_from_jira_key,
     get_current_status_for_current_workspace,
     set_status_for_current_workspace,
 )
@@ -72,7 +73,7 @@ from et.ws import (
 
 if TYPE_CHECKING:
     from et.config import EtConfig
-    from et.jira import JiraComponent, JiraIssue
+    from et.jira import JiraComponent, JiraIssue, JiraSprint
     from et.task import TaskCreateResult
 
 
@@ -436,7 +437,17 @@ def _jira_key_option() -> str | None:
 
 
 @jira_app.command("start")
-def jira_start() -> None:
+def jira_start(
+    key: str | None = typer.Option(
+        None,
+        "--key",
+        "-k",
+        help=(
+            "Jira issue key to start directly (e.g. ISD-123), instead of picking one "
+            "from your active issues."
+        ),
+    ),
+) -> None:
     """Start a new task: allocate a workspace slot, its Tracker timer, and switch to it.
 
     Lists your active Jira issues that aren't already linked to a
@@ -447,12 +458,66 @@ def jira_start() -> None:
     GNOME's workspace count by one). The terminal window `et jira start`
     was run from is moved along to the new workspace, so it doesn't get
     left behind.
+
+    With `-k/--key KEY`, skips the picker and starts that specific issue
+    directly (failing if it's already linked to a workspace). It follows
+    the same steps as above, plus one more: if the issue isn't already in
+    its project's current active sprint, offers to add it there too.
     """
     try:
         config = load_config()
     except ConfigError:
         config = None
     base_url = config.jira.base_url.rstrip("/") if config and config.jira else ""
+
+    def _key_display(issue_key: str) -> str:
+        return _hyperlink(issue_key, f"{base_url}/browse/{issue_key}") if base_url else issue_key
+
+    def confirm_transition(issue: JiraIssue) -> bool:
+        status_display = issue.status or "an unknown state"
+        return typer.confirm(
+            f"{_key_display(issue.key)} is currently '{status_display}'. "
+            "Move it to 'In Progress'?",
+            default=True,
+        )
+
+    def confirm_grow(count: int) -> bool:
+        return typer.confirm(
+            f"All {count} workspaces are in use. Add another workspace?", default=True
+        )
+
+    if key is not None:
+
+        def select_sprint(sprints: list[JiraSprint]) -> JiraSprint | None:
+            if len(sprints) == 1:
+                sprint = sprints[0]
+                return (
+                    sprint
+                    if typer.confirm(
+                        f"{_key_display(key)} isn't in the current sprint '{sprint.name}'. "
+                        "Add it?",
+                        default=True,
+                    )
+                    else None
+                )
+            typer.echo(f"{_key_display(key)} isn't in any of the project's active sprints:")
+            return _prompt_sprint_choice(
+                sprints, "Pick a sprint number to add it to (or 0 to skip)"
+            )
+
+        def warn(message: str) -> None:
+            typer.echo(f"Warning: {message}", err=True)
+
+        try:
+            key_result = create_task_from_jira_key(
+                key, confirm_transition, select_sprint, confirm_grow, warn
+            )
+        except (ConfigError, TaskError) as error:
+            typer.echo(f"Error: {error}", err=True)
+            raise typer.Exit(code=1) from error
+
+        _print_task_created(key_result)
+        return
 
     def select_issue(issues: list[JiraIssue]) -> JiraIssue | None:
         if not issues:
@@ -461,11 +526,7 @@ def jira_start() -> None:
 
         typer.echo("Active issues not yet linked to a workspace:")
         for position, issue in enumerate(issues, start=1):
-            key_display = (
-                _hyperlink(issue.key, f"{base_url}/browse/{issue.key}")
-                if base_url
-                else issue.key
-            )
+            key_display = _key_display(issue.key)
             status_display = f" ({issue.status})" if issue.status else ""
             typer.echo(
                 f"  {position}. {key_display} [{issue.priority}]{status_display} {issue.summary}"
@@ -479,21 +540,6 @@ def jira_start() -> None:
         if selected < 1 or selected > len(issues):
             return None
         return issues[selected - 1]
-
-    def confirm_transition(issue: JiraIssue) -> bool:
-        status_display = issue.status or "an unknown state"
-        key_display = (
-            _hyperlink(issue.key, f"{base_url}/browse/{issue.key}") if base_url else issue.key
-        )
-        return typer.confirm(
-            f"{key_display} is currently '{status_display}'. Move it to 'In Progress'?",
-            default=True,
-        )
-
-    def confirm_grow(count: int) -> bool:
-        return typer.confirm(
-            f"All {count} workspaces are in use. Add another workspace?", default=True
-        )
 
     try:
         result = create_task_from_jira(select_issue, confirm_transition, confirm_grow)
@@ -551,6 +597,27 @@ def _prompt_component(components: list[JiraComponent]) -> JiraComponent | None:
     return components[selected - 1]
 
 
+def _prompt_sprint_choice(sprints: list[JiraSprint], prompt_label: str) -> JiraSprint | None:
+    """Show `sprints` as a numbered list (with 0 to skip) and return the user's pick.
+
+    Used when a board has more than one concurrently active sprint, so the
+    caller has to pick which one to use rather than assuming there's only
+    ever one.
+    """
+    typer.echo("Active sprints:")
+    for position, sprint in enumerate(sprints, start=1):
+        typer.echo(f"  {position}. {sprint.name}")
+
+    choice = typer.prompt(prompt_label, default="0")
+    try:
+        selected = int(choice)
+    except ValueError:
+        selected = 0
+    if selected < 1 or selected > len(sprints):
+        return None
+    return sprints[selected - 1]
+
+
 def _confirm_create(fields: list[tuple[str, str]]) -> bool:
     """Print a summary of the issue about to be created and ask for confirmation."""
     typer.echo("\nAbout to create this issue:")
@@ -598,6 +665,11 @@ def jira_create(
     def confirm_sprint() -> bool:
         return typer.confirm("Add to the current sprint?", default=True)
 
+    def select_sprint(sprints: list[JiraSprint]) -> JiraSprint | None:
+        if len(sprints) == 1:
+            return sprints[0]
+        return _prompt_sprint_choice(sprints, "Pick a sprint number for this issue (or 0 to skip)")
+
     def prompt_estimate_hours() -> str:
         return str(typer.prompt("Estimate in hours (optional)", default=""))
 
@@ -614,6 +686,7 @@ def jira_create(
         prompt_priority=prompt_priority,
         select_component=_prompt_component,
         confirm_sprint=confirm_sprint,
+        select_sprint=select_sprint,
         prompt_estimate_hours=prompt_estimate_hours,
         prompt_description=prompt_description,
         confirm_create=_confirm_create,

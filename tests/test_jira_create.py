@@ -42,6 +42,7 @@ def _prompts(**overrides: object) -> IssueDraftPrompts:
         prompt_priority=lambda default: default,
         select_component=lambda components: None,
         confirm_sprint=lambda: False,
+        select_sprint=lambda sprints: sprints[0] if sprints else None,
         prompt_estimate_hours=lambda: "",
         prompt_description=lambda default: default,
         confirm_create=lambda fields: True,
@@ -109,8 +110,8 @@ def test_create_issue_interactive_assigns_self_and_component(
 
 
 @patch("et.jira_create.create_issue", return_value="PROJ-3")
-@patch("et.jira_create.discover_board_id", return_value="42")
-@patch("et.jira_create.fetch_active_sprint", return_value=JiraSprint(id="7", name="Sprint 7"))
+@patch("et.task.discover_board_id", return_value="42")
+@patch("et.task.fetch_active_sprints", return_value=[JiraSprint(id="7", name="Sprint 7")])
 @patch("et.jira_create.fetch_sprint_field_id", return_value="customfield_10020")
 @patch("et.jira_create.fetch_components", return_value=[])
 def test_create_issue_interactive_adds_sprint_and_persists_board_id(
@@ -134,8 +135,8 @@ def test_create_issue_interactive_adds_sprint_and_persists_board_id(
 def test_create_issue_interactive_uses_existing_board_id(mock_components, mock_create, config_dir):
     _write_config(config_dir, _jira_config(board_id="99"))
 
-    with patch("et.jira_create.discover_board_id") as mock_discover, patch(
-        "et.jira_create.fetch_active_sprint", return_value=None
+    with patch("et.task.discover_board_id") as mock_discover, patch(
+        "et.task.fetch_active_sprints", return_value=[]
     ) as mock_sprint:
         create_issue_interactive(_prompts(confirm_sprint=lambda: True))
         mock_discover.assert_not_called()
@@ -296,7 +297,7 @@ def test_create_issue_interactive_raises_jira_create_error_on_api_failure(
         create_issue_interactive(_prompts())
 
 
-@patch("et.jira_create.discover_board_id", return_value=None)
+@patch("et.task.discover_board_id", return_value=None)
 @patch("et.jira_create.fetch_components", return_value=[])
 def test_create_issue_interactive_raises_when_no_board_configured(
     mock_components, mock_discover, config_dir
@@ -350,21 +351,21 @@ def test_create_issue_interactive_passes_summary_fields_to_confirm(
 
 @patch("et.jira_create.create_issue", return_value="PROJ-10")
 @patch("et.jira_create.fetch_sprint_field_id", return_value="customfield_10020")
-@patch("et.jira_create.discover_board_id", return_value="99")
+@patch("et.task.discover_board_id", return_value="99")
 @patch("et.jira_create.fetch_components", return_value=[])
 def test_create_issue_interactive_falls_back_to_scrum_board_when_cached_board_lacks_sprints(
     mock_components, mock_discover, mock_field, mock_create, config_dir
 ):
     _write_config(config_dir, _jira_config(board_id="1304"))
 
-    def fake_fetch_active_sprint(jira_config, board_id):
+    def fake_fetch_active_sprints(jira_config, board_id):
         del jira_config
         if board_id == "1304":
             raise JiraBoardWithoutSprintsError("board 1304 does not support sprints")
         assert board_id == "99"
-        return JiraSprint(id="7", name="Sprint 7")
+        return [JiraSprint(id="7", name="Sprint 7")]
 
-    with patch("et.jira_create.fetch_active_sprint", side_effect=fake_fetch_active_sprint):
+    with patch("et.task.fetch_active_sprints", side_effect=fake_fetch_active_sprints):
         result = create_issue_interactive(_prompts(confirm_sprint=lambda: True))
 
     assert result is not None
@@ -376,7 +377,7 @@ def test_create_issue_interactive_falls_back_to_scrum_board_when_cached_board_la
     assert load_config().jira.board_id == "99"
 
 
-@patch("et.jira_create.discover_board_id", return_value=None)
+@patch("et.task.discover_board_id", return_value=None)
 @patch("et.jira_create.fetch_components", return_value=[])
 def test_create_issue_interactive_raises_when_cached_board_lacks_sprints_and_no_fallback(
     mock_components, mock_discover, config_dir
@@ -384,14 +385,14 @@ def test_create_issue_interactive_raises_when_cached_board_lacks_sprints_and_no_
     _write_config(config_dir, _jira_config(board_id="1304"))
 
     with patch(
-        "et.jira_create.fetch_active_sprint",
+        "et.task.fetch_active_sprints",
         side_effect=JiraBoardWithoutSprintsError("board 1304 does not support sprints"),
     ):
         with pytest.raises(JiraCreateError, match="does not support sprints"):
             create_issue_interactive(_prompts(confirm_sprint=lambda: True))
 
 
-@patch("et.jira_create.discover_board_id", return_value="1304")
+@patch("et.task.discover_board_id", return_value="1304")
 @patch("et.jira_create.fetch_components", return_value=[])
 def test_create_issue_interactive_raises_when_fallback_board_is_same_as_cached(
     mock_components, mock_discover, config_dir
@@ -399,7 +400,7 @@ def test_create_issue_interactive_raises_when_fallback_board_is_same_as_cached(
     _write_config(config_dir, _jira_config(board_id="1304"))
 
     with patch(
-        "et.jira_create.fetch_active_sprint",
+        "et.task.fetch_active_sprints",
         side_effect=JiraBoardWithoutSprintsError("board 1304 does not support sprints"),
     ):
         with pytest.raises(JiraCreateError, match="does not support sprints"):

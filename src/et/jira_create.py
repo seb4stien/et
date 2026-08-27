@@ -23,24 +23,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from et.config import EtConfig, JiraConfig, load_config, save_config
+from et.config import EtConfig, load_config
 from et.github_ref import GithubRefError, fetch_github_ref, parse_github_url
 from et.jira import (
-    JiraBoardWithoutSprintsError,
     JiraComponent,
     JiraError,
     JiraSprint,
     create_issue,
-    discover_board_id,
-    fetch_active_sprint,
     fetch_bug_link_field_id,
     fetch_components,
     fetch_sprint_field_id,
     search_user_account_id,
     text_to_adf,
 )
+from et.task import TaskError, fetch_active_sprints_or_warn, resolve_board_id
 
-SCRUM_BOARD_TYPE = "scrum"
 DEFAULT_ISSUE_TYPE = "Story"
 DEFAULT_PRIORITY = "Medium"
 ISSUE_TYPES = ("Bug", "Story", "Task")
@@ -79,88 +76,11 @@ class IssueDraftPrompts:
     prompt_priority: Callable[[str], str]
     select_component: Callable[[list[JiraComponent]], JiraComponent | None]
     confirm_sprint: Callable[[], bool]
+    select_sprint: Callable[[list[JiraSprint]], JiraSprint | None]
     prompt_estimate_hours: Callable[[], str]
     prompt_description: Callable[[str], str]
     confirm_create: Callable[[list[tuple[str, str]]], bool]
     warn: Callable[[str], None] = _no_op_warn
-
-
-def _persist_board_id(config: EtConfig, jira: JiraConfig, board_id: str) -> None:
-    """Save `board_id` as `jira.board_id`, so later runs skip board discovery."""
-    updated_jira = JiraConfig(
-        base_url=jira.base_url,
-        email=jira.email,
-        pat=jira.pat,
-        jql=jira.jql,
-        priority_order=jira.priority_order,
-        project_key=jira.project_key,
-        board_id=board_id,
-    )
-    save_config(EtConfig(jira=updated_jira, workspaces=config.workspaces))
-
-
-def _resolve_board_id(config: EtConfig, jira: JiraConfig, project_key: str) -> str | None:
-    """Return `jira.board_id`, discovering and persisting it if not yet set.
-
-    Discovery prefers a Scrum board (`board_type="scrum"`), since only
-    Scrum boards support sprints — a Kanban board would otherwise get
-    cached here and later fail every `et jira create --sprint` with a
-    confusing "board does not support sprints" error.
-    """
-    if jira.board_id:
-        return jira.board_id
-
-    board_id = discover_board_id(jira, project_key, board_type=SCRUM_BOARD_TYPE)
-    if board_id is None:
-        return None
-
-    _persist_board_id(config, jira, board_id)
-    return board_id
-
-
-def _fetch_active_sprint_or_warn(
-    config: EtConfig,
-    jira: JiraConfig,
-    project_key: str,
-    board_id: str,
-    warn: Callable[[str], None],
-) -> JiraSprint | None:
-    """Fetch the active sprint on `board_id`, falling back to a fresh Scrum board lookup.
-
-    If `board_id` (whether cached or just discovered) turns out not to
-    support sprints at all (Jira's board API rejects Kanban boards with a
-    "does not support sprints" 400), tries discovering a genuine Scrum
-    board for `project_key` and persisting it in its place. Raises
-    `JiraCreateError` if that fallback also can't find a Scrum board,
-    since there's no sensible way to add the issue to a sprint at that
-    point. Any other `JiraError` (network issue, no active sprint, etc.)
-    is reported via `warn` and treated as "skip the sprint" — this
-    function owns all such warnings, so callers should not warn again on
-    a `None` return.
-    """
-    try:
-        sprint = fetch_active_sprint(jira, board_id)
-    except JiraBoardWithoutSprintsError:
-        fallback_board_id = discover_board_id(jira, project_key, board_type=SCRUM_BOARD_TYPE)
-        if fallback_board_id is None or fallback_board_id == board_id:
-            raise JiraCreateError(
-                f"the configured Jira board (id {board_id}) does not support sprints, and no "
-                f"Scrum board could be found for project '{project_key}' (set jira.board_id "
-                "to a Scrum board's id manually, or decline the sprint prompt to skip it)"
-            ) from None
-        try:
-            sprint = fetch_active_sprint(jira, fallback_board_id)
-        except JiraError as exc:
-            warn(f"could not resolve the current sprint: {exc}")
-            return None
-        _persist_board_id(config, jira, fallback_board_id)
-    except JiraError as exc:
-        warn(f"could not resolve the current sprint: {exc}")
-        return None
-
-    if sprint is None:
-        warn("no active sprint found on the project's board; skipping sprint")
-    return sprint
 
 
 def _summarize_description(description: str) -> str:
@@ -238,7 +158,7 @@ def create_issue_interactive(
     sprint_field_id: str | None = None
     sprint: JiraSprint | None = None
     if prompts.confirm_sprint():
-        board_id = _resolve_board_id(config, jira, project_key)
+        board_id = resolve_board_id(config, jira, project_key)
         if board_id is None:
             raise JiraCreateError(
                 f"no Jira Agile board configured or discoverable for project "
@@ -246,7 +166,14 @@ def create_issue_interactive(
                 "decline the sprint prompt to skip it)"
             )
 
-        sprint = _fetch_active_sprint_or_warn(config, jira, project_key, board_id, prompts.warn)
+        try:
+            active_sprints = fetch_active_sprints_or_warn(
+                config, jira, project_key, board_id, prompts.warn
+            )
+        except TaskError as exc:
+            raise JiraCreateError(str(exc)) from exc
+        if active_sprints:
+            sprint = prompts.select_sprint(active_sprints)
         if sprint is not None:
             try:
                 sprint_field_id = fetch_sprint_field_id(jira)

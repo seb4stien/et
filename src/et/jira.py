@@ -31,6 +31,8 @@ FIELD_PATH = "rest/api/3/field"
 ISSUE_PATH = "rest/api/3/issue"
 BOARD_PATH = "rest/agile/1.0/board"
 BOARD_SPRINT_PATH_TEMPLATE = "rest/agile/1.0/board/{board_id}/sprint"
+AGILE_ISSUE_PATH_TEMPLATE = "rest/agile/1.0/issue/{key}"
+SPRINT_ISSUE_PATH_TEMPLATE = "rest/agile/1.0/sprint/{sprint_id}/issue"
 SPRINT_FIELD_NAME = "Sprint"
 BUG_LINK_FIELD_NAME = "Bug link"
 
@@ -207,14 +209,17 @@ def discover_board_id(
     return str(board_id) if board_id is not None else None
 
 
-def fetch_active_sprint(jira_config: JiraConfig, board_id: str) -> JiraSprint | None:
-    """Return the currently active sprint on `board_id`, or None if there isn't one.
+def fetch_active_sprints(jira_config: JiraConfig, board_id: str) -> list[JiraSprint]:
+    """Return every currently active sprint on `board_id` (empty if there are none).
 
     Calls Jira's `GET /rest/agile/1.0/board/{id}/sprint?state=active`
-    endpoint. Raises `JiraBoardWithoutSprintsError` (a `JiraError`
-    subclass) if `board_id` doesn't support sprints at all (e.g. it's a
-    Kanban board), so callers can distinguish "wrong kind of board" from
-    "no sprint currently active" or a transient API failure.
+    endpoint. A board can have more than one concurrently active sprint
+    (e.g. separate sprints per sub-team), so callers that need "the"
+    active sprint must pick one themselves rather than assuming there's
+    only ever zero or one. Raises `JiraBoardWithoutSprintsError` (a
+    `JiraError` subclass) if `board_id` doesn't support sprints at all
+    (e.g. it's a Kanban board), so callers can distinguish "wrong kind of
+    board" from "no sprint currently active" or a transient API failure.
     """
     url = _jira_url(jira_config, BOARD_SPRINT_PATH_TEMPLATE.format(board_id=board_id))
 
@@ -245,21 +250,79 @@ def fetch_active_sprint(jira_config: JiraConfig, board_id: str) -> JiraSprint | 
         raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
 
     values = payload.get("values") if isinstance(payload, dict) else None
-    if not isinstance(values, list) or not values:
-        return None
-    first = values[0]
-    if not isinstance(first, dict):
-        return None
-    sprint_id = first.get("id")
-    name = first.get("name")
-    if sprint_id is None:
-        return None
-    return JiraSprint(id=str(sprint_id), name=name if isinstance(name, str) else "")
+    if not isinstance(values, list):
+        return []
+
+    sprints: list[JiraSprint] = []
+    for raw_sprint in values:
+        if not isinstance(raw_sprint, dict):
+            continue
+        sprint_id = raw_sprint.get("id")
+        if sprint_id is None:
+            continue
+        name = raw_sprint.get("name")
+        sprints.append(JiraSprint(id=str(sprint_id), name=name if isinstance(name, str) else ""))
+    return sprints
 
 
 def _mentions_unsupported_sprints(response_text: str) -> bool:
     """Return True if `response_text` (a Jira error body) says a board lacks sprints."""
     return "does not support sprints" in response_text.lower()
+
+
+def fetch_issue_sprint(jira_config: JiraConfig, issue_key: str) -> JiraSprint | None:
+    """Return `issue_key`'s current (open) sprint, or None if it isn't in one.
+
+    Calls Jira's Agile API `GET /rest/agile/1.0/issue/{key}?fields=sprint`
+    endpoint, which — unlike the plain issue API — exposes the issue's
+    current sprint directly without needing to look up the "Sprint" custom
+    field's id first. Used by `et jira start -k` to check whether an issue
+    already belongs to the project's active sprint before adding it.
+    Raises `JiraError` if the request cannot be made or Jira rejects it.
+    """
+    url = _jira_url(jira_config, AGILE_ISSUE_PATH_TEMPLATE.format(key=issue_key))
+    payload = _get_json(jira_config, url, params={"fields": "sprint"})
+    if not isinstance(payload, dict):
+        raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
+
+    fields = payload.get("fields")
+    sprint_field = fields.get("sprint") if isinstance(fields, dict) else None
+    if not isinstance(sprint_field, dict):
+        return None
+
+    sprint_id = sprint_field.get("id")
+    if sprint_id is None:
+        return None
+    name = sprint_field.get("name")
+    return JiraSprint(id=str(sprint_id), name=name if isinstance(name, str) else "")
+
+
+def add_issue_to_sprint(jira_config: JiraConfig, sprint_id: str, issue_key: str) -> None:
+    """Add `issue_key` to the sprint identified by `sprint_id`.
+
+    Calls Jira's Agile API `POST /rest/agile/1.0/sprint/{sprint_id}/issue`
+    endpoint (which returns 204 No Content on success) with
+    `{"issues": [issue_key]}`. Used by `et jira start -k` to bring an issue
+    into the project's current active sprint when it isn't already there.
+    Raises `JiraError` if the request cannot be made or Jira rejects it.
+    """
+    url = _jira_url(jira_config, SPRINT_ISSUE_PATH_TEMPLATE.format(sprint_id=sprint_id))
+
+    try:
+        response = requests.post(
+            url,
+            json={"issues": [issue_key]},
+            auth=(jira_config.email, jira_config.pat),
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
+
+    if response.status_code not in (200, 204):
+        raise JiraError(
+            f"Jira API request to {url} failed with status {response.status_code}: "
+            f"{response.text.strip()[:500]}"
+        )
 
 
 def fetch_field_id_by_name(jira_config: JiraConfig, field_name: str) -> str | None:
@@ -428,6 +491,44 @@ def fetch_issue_status(jira_config: JiraConfig, issue_key: str) -> str:
     if not isinstance(name, str) or not name:
         raise JiraError(f"unexpected Jira API response from {url}: no status name found")
     return name
+
+
+def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
+    """Return `issue_key`'s summary, priority, and status as a `JiraIssue`.
+
+    Calls Jira's `GET /rest/api/3/issue/{key}?fields=summary,priority,status`
+    endpoint. Used by `et jira start -k` to look up an issue given directly
+    by key, rather than picked from `fetch_active_issues`'s candidate list.
+    Raises `JiraError` if the request cannot be made, Jira rejects it, or
+    the response has no usable summary/status.
+    """
+    url = _jira_url(jira_config, f"{ISSUE_PATH}/{issue_key}")
+    payload = _get_json(jira_config, url, params={"fields": "summary,priority,status"})
+    if not isinstance(payload, dict):
+        raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
+
+    fields = payload.get("fields")
+    if not isinstance(fields, dict):
+        raise JiraError(f"unexpected Jira API response from {url}: no fields found")
+
+    summary = fields.get("summary")
+    if not isinstance(summary, str) or not summary:
+        raise JiraError(f"unexpected Jira API response from {url}: no summary found")
+
+    status_field = fields.get("status") or {}
+    status = status_field.get("name") if isinstance(status_field, dict) else None
+    if not isinstance(status, str) or not status:
+        raise JiraError(f"unexpected Jira API response from {url}: no status name found")
+
+    priority_field = fields.get("priority") or {}
+    priority = priority_field.get("name") if isinstance(priority_field, dict) else None
+
+    return JiraIssue(
+        key=issue_key,
+        summary=summary,
+        priority=priority if isinstance(priority, str) else "",
+        status=status,
+    )
 
 
 def fetch_issue_basis(jira_config: JiraConfig, issue_key: str) -> JiraIssueBasis:

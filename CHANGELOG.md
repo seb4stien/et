@@ -6,6 +6,16 @@ All notable changes to `et` are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- `et jira start -k KEY` (`--key`): start a task from a specific Jira issue
+  key directly, skipping the active-issues picker (failing if `KEY` is
+  already linked to a workspace). Follows the same steps as the
+  interactive `et jira start` — offering to move the issue to "In
+  Progress" if needed — plus one more: if the issue isn't already in one
+  of its project's current active sprints, asks whether to add it to one
+  (reusing `et jira create --sprint`'s Agile board discovery/caching;
+  prompts you to pick when more than one sprint is active); degrades to
+  a warning, rather than failing, if no board/active sprint can be
+  resolved.
 - `et git create-branch` (alias `et git cb`): create (and switch to) a git
   branch named after the current task's Jira issue, following Canonical's
   `type/scope-short-description-jirakey` PR branch naming convention.

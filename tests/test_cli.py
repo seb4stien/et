@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from et.cli import _hyperlink, app
 from et.config import EtConfig, JiraConfig, WorkspaceConfigEntry
-from et.jira import JiraIssue
+from et.jira import JiraIssue, JiraSprint
 from et.jira_time import AllLogTimeResult, JiraLogTimeError, LogTimeResult, SkippedWorkspace
 from et.task import TaskCompleteResult, TaskCreateResult, TaskError
 from et.tracker import TrackerError
@@ -528,7 +528,135 @@ def test_jira_start_defaults_grow_prompt_to_yes(mock_create_from_jira):
 
     assert result.exit_code == 0
     assert "All 4 workspaces are in use. Add another workspace? [Y/n]" in result.stdout
+
+
+@patch("et.cli.create_task_from_jira_key")
+def test_jira_start_with_key_creates_task_directly(mock_create_from_jira_key):
+    mock_create_from_jira_key.return_value = TaskCreateResult(
+        workspace_index=2, name="ISD-2", ref="jira:ISD-2", timer_created=True, window_moved=True
+    )
+
+    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"])
+
+    assert result.exit_code == 0
+    assert "Created workspace 3: 'ISD-2' (linked to ISD-2)" in result.stdout
+    mock_create_from_jira_key.assert_called_once()
+    assert mock_create_from_jira_key.call_args[0][0] == "ISD-2"
+
+
+@patch("et.cli.create_task_from_jira_key")
+def test_jira_start_with_key_reports_error(mock_create_from_jira_key):
+    mock_create_from_jira_key.side_effect = TaskError("ISD-2 is already linked to workspace 1")
+
+    result = runner.invoke(app, ["jira", "start", "--key", "ISD-2"])
+
+    assert result.exit_code == 1
+    assert "Error: ISD-2 is already linked to workspace 1" in result.output
+
+
+@patch("et.cli.create_task_from_jira_key")
+def test_jira_start_with_key_prompts_to_move_issue_to_in_progress_when_confirmed(
+    mock_create_from_jira_key,
+):
+    captured = {}
+
+    def fake_create_from_jira_key(
+        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+    ):
+        del select_sprint
+        del confirm_grow
+        del warn
+        issue = JiraIssue(key=issue_key, summary="Second issue", priority="High", status="To Do")
+        captured["confirmed"] = confirm_transition(issue)
+        return TaskCreateResult(
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            window_moved=True,
+        )
+
+    mock_create_from_jira_key.side_effect = fake_create_from_jira_key
+
+    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "ISD-2 is currently 'To Do'. Move it to 'In Progress'?" in result.stdout
     assert captured["confirmed"] is True
+
+
+@patch("et.cli.create_task_from_jira_key")
+def test_jira_start_with_key_prompts_to_add_to_sprint(mock_create_from_jira_key):
+    captured = {}
+
+    def fake_create_from_jira_key(
+        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+    ):
+        del confirm_transition
+        del confirm_grow
+        del warn
+        captured["selected"] = select_sprint([JiraSprint(id="7", name="Sprint 7")])
+        return TaskCreateResult(
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            window_moved=True,
+        )
+
+    mock_create_from_jira_key.side_effect = fake_create_from_jira_key
+
+    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "ISD-2 isn't in the current sprint 'Sprint 7'. Add it?" in result.stdout
+    assert captured["selected"] == JiraSprint(id="7", name="Sprint 7")
+
+
+@patch("et.cli.create_task_from_jira_key")
+def test_jira_start_with_key_prompts_to_choose_among_multiple_active_sprints(
+    mock_create_from_jira_key,
+):
+    captured = {}
+
+    def fake_create_from_jira_key(
+        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+    ):
+        del confirm_transition
+        del confirm_grow
+        del warn
+        captured["selected"] = select_sprint(
+            [JiraSprint(id="7", name="Sprint 7"), JiraSprint(id="8", name="Sprint 8")]
+        )
+        return TaskCreateResult(
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            window_moved=True,
+        )
+
+    mock_create_from_jira_key.side_effect = fake_create_from_jira_key
+
+    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="2\n")
+
+    assert result.exit_code == 0
+    assert "ISD-2 isn't in any of the project's active sprints:" in result.stdout
+    assert captured["selected"] == JiraSprint(id="8", name="Sprint 8")
+
+
+@patch("et.cli.create_task_from_jira_key")
+def test_jira_start_with_key_prints_warnings(mock_create_from_jira_key):
+    def fake_create_from_jira_key(
+        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+    ):
+        del issue_key
+        del confirm_transition
+        del select_sprint
+        del confirm_grow
+        warn("no active sprint found on the project's board; skipping sprint")
+        return TaskCreateResult(
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            window_moved=True,
+        )
+
+    mock_create_from_jira_key.side_effect = fake_create_from_jira_key
+
+    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"])
+
+    assert result.exit_code == 0
+    assert "Warning: no active sprint found" in result.output
 
 
 @patch("et.cli._hyperlink", side_effect=lambda text, url: f"<{url}|{text}>")

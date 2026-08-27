@@ -13,15 +13,18 @@ from et.jira import (
     JiraError,
     JiraIssue,
     JiraSprint,
+    add_issue_to_sprint,
     create_comment,
     create_issue,
     create_worklog,
     discover_board_id,
     fetch_active_issues,
-    fetch_active_sprint,
+    fetch_active_sprints,
     fetch_bug_link_field_id,
     fetch_components,
+    fetch_issue,
     fetch_issue_basis,
+    fetch_issue_sprint,
     fetch_issue_status,
     fetch_sprint_field_id,
     fetch_transitions,
@@ -464,6 +467,135 @@ def test_fetch_issue_status_wraps_network_errors(mock_get):
         fetch_issue_status(_config(), "PROJ-1")
 
 
+# --- fetch_issue -------------------------------------------------------
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_returns_summary_priority_and_status(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        {
+            "fields": {
+                "summary": "Add wildcard SNI support",
+                "priority": {"name": "High"},
+                "status": {"name": "To Do"},
+            }
+        },
+    )
+    config = _config(base_url="https://example.atlassian.net")
+
+    issue = fetch_issue(config, "PROJ-1")
+
+    assert issue == JiraIssue(
+        key="PROJ-1", summary="Add wildcard SNI support", priority="High", status="To Do"
+    )
+    args, kwargs = mock_get.call_args
+    assert args[0] == "https://example.atlassian.net/rest/api/3/issue/PROJ-1"
+    assert kwargs["params"] == {"fields": "summary,priority,status"}
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_defaults_priority_to_empty_string(mock_get):
+    mock_get.return_value = _json_response(
+        200, {"fields": {"summary": "A summary", "status": {"name": "To Do"}}}
+    )
+
+    issue = fetch_issue(_config(), "PROJ-1")
+
+    assert issue.priority == ""
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_raises_when_no_summary_in_response(mock_get):
+    mock_get.return_value = _json_response(200, {"fields": {"status": {"name": "To Do"}}})
+
+    with pytest.raises(JiraError, match="no summary found"):
+        fetch_issue(_config(), "PROJ-1")
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_raises_when_no_status_in_response(mock_get):
+    mock_get.return_value = _json_response(200, {"fields": {"summary": "A summary"}})
+
+    with pytest.raises(JiraError, match="no status name found"):
+        fetch_issue(_config(), "PROJ-1")
+
+
+@patch("et.jira.requests.get", side_effect=requests.ConnectionError("no route to host"))
+def test_fetch_issue_wraps_network_errors(mock_get):
+    with pytest.raises(JiraError, match="no route to host"):
+        fetch_issue(_config(), "PROJ-1")
+
+
+# --- fetch_issue_sprint --------------------------------------------------
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_sprint_returns_current_sprint(mock_get):
+    mock_get.return_value = _json_response(
+        200, {"fields": {"sprint": {"id": 7, "name": "Sprint 7"}}}
+    )
+    config = _config(base_url="https://example.atlassian.net")
+
+    sprint = fetch_issue_sprint(config, "PROJ-1")
+
+    assert sprint == JiraSprint(id="7", name="Sprint 7")
+    args, kwargs = mock_get.call_args
+    assert args[0] == "https://example.atlassian.net/rest/agile/1.0/issue/PROJ-1"
+    assert kwargs["params"] == {"fields": "sprint"}
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_sprint_returns_none_when_issue_has_no_sprint(mock_get):
+    mock_get.return_value = _json_response(200, {"fields": {}})
+
+    assert fetch_issue_sprint(_config(), "PROJ-1") is None
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_sprint_raises_on_non_200_status(mock_get):
+    mock_get.return_value = _json_response(404, {"errorMessages": ["not found"]})
+
+    with pytest.raises(JiraError, match="404"):
+        fetch_issue_sprint(_config(), "PROJ-1")
+
+
+@patch("et.jira.requests.get", side_effect=requests.ConnectionError("no route to host"))
+def test_fetch_issue_sprint_wraps_network_errors(mock_get):
+    with pytest.raises(JiraError, match="no route to host"):
+        fetch_issue_sprint(_config(), "PROJ-1")
+
+
+# --- add_issue_to_sprint -------------------------------------------------
+
+
+@patch("et.jira.requests.post")
+def test_add_issue_to_sprint_posts_issue_key(mock_post):
+    mock_post.return_value = _json_response(204, {})
+    config = _config(base_url="https://example.atlassian.net")
+
+    add_issue_to_sprint(config, "7", "PROJ-1")
+
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://example.atlassian.net/rest/agile/1.0/sprint/7/issue"
+    assert kwargs["json"] == {"issues": ["PROJ-1"]}
+    assert kwargs["auth"] == (config.email, config.pat)
+
+
+@patch("et.jira.requests.post")
+def test_add_issue_to_sprint_raises_on_non_2xx_status(mock_post):
+    mock_post.return_value = _json_response(400, {"errorMessages": ["bad request"]})
+
+    with pytest.raises(JiraError, match="400"):
+        add_issue_to_sprint(_config(), "7", "PROJ-1")
+
+
+@patch("et.jira.requests.post", side_effect=requests.ConnectionError("no route to host"))
+def test_add_issue_to_sprint_wraps_network_errors(mock_post):
+    with pytest.raises(JiraError, match="no route to host"):
+        add_issue_to_sprint(_config(), "7", "PROJ-1")
+
+
 # --- fetch_issue_basis ------------------------------------------------------
 
 
@@ -588,19 +720,24 @@ def test_discover_board_id_returns_none_when_no_boards(mock_get):
 
 
 @patch("et.jira.requests.get")
-def test_fetch_active_sprint_returns_first_active_sprint(mock_get):
-    mock_get.return_value = _json_response(200, {"values": [{"id": 7, "name": "Sprint 7"}]})
+def test_fetch_active_sprints_returns_all_active_sprints(mock_get):
+    mock_get.return_value = _json_response(
+        200, {"values": [{"id": 7, "name": "Sprint 7"}, {"id": 8, "name": "Sprint 8"}]}
+    )
 
-    sprint = fetch_active_sprint(_config(), "42")
+    sprints = fetch_active_sprints(_config(), "42")
 
-    assert sprint == JiraSprint(id="7", name="Sprint 7")
+    assert sprints == [
+        JiraSprint(id="7", name="Sprint 7"),
+        JiraSprint(id="8", name="Sprint 8"),
+    ]
 
 
 @patch("et.jira.requests.get")
-def test_fetch_active_sprint_returns_none_when_no_active_sprint(mock_get):
+def test_fetch_active_sprints_returns_empty_list_when_no_active_sprint(mock_get):
     mock_get.return_value = _json_response(200, {"values": []})
 
-    assert fetch_active_sprint(_config(), "42") is None
+    assert fetch_active_sprints(_config(), "42") == []
 
 
 @patch("et.jira.requests.get")
@@ -691,7 +828,7 @@ def test_discover_board_id_omits_type_param_by_default(mock_get):
 
 
 @patch("et.jira.requests.get")
-def test_fetch_active_sprint_raises_board_without_sprints_error(mock_get):
+def test_fetch_active_sprints_raises_board_without_sprints_error(mock_get):
     mock_get.return_value = _json_response(
         400, {"errorMessages": ["The board does not support sprints"], "errors": {}}
     )
@@ -699,12 +836,12 @@ def test_fetch_active_sprint_raises_board_without_sprints_error(mock_get):
     from et.jira import JiraBoardWithoutSprintsError
 
     with pytest.raises(JiraBoardWithoutSprintsError, match="does not support sprints"):
-        fetch_active_sprint(_config(), "1304")
+        fetch_active_sprints(_config(), "1304")
 
 
 @patch("et.jira.requests.get")
-def test_fetch_active_sprint_raises_generic_error_on_other_400(mock_get):
+def test_fetch_active_sprints_raises_generic_error_on_other_400(mock_get):
     mock_get.return_value = _json_response(400, {"errorMessages": ["something else broke"]})
 
     with pytest.raises(JiraError, match="400"):
-        fetch_active_sprint(_config(), "1304")
+        fetch_active_sprints(_config(), "1304")

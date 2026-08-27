@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from et.config import ConfigError, EtConfig, JiraConfig, WorkspaceConfigEntry
-from et.jira import JiraError, JiraIssue, JiraTransition
+from et.jira import JiraError, JiraIssue, JiraSprint, JiraTransition
 from et.jira_time import JiraLogTimeError, LogTimeResult
 from et.task import (
     BLOCKED_STATUS,
@@ -17,7 +17,9 @@ from et.task import (
     add_comment_to_current_workspace,
     complete_task_for_current_workspace,
     create_task_from_jira,
+    create_task_from_jira_key,
     create_task_workspace,
+    ensure_issue_in_active_sprint,
     get_current_status_for_current_workspace,
     set_status_for_current_workspace,
 )
@@ -429,6 +431,321 @@ def test_create_task_from_jira_wraps_fetch_transitions_error(
         create_task_from_jira(
             select_issue=lambda issues: issues[0], confirm_transition=lambda issue: True
         )
+
+
+# --- create_task_from_jira_key -----------------------------------------------
+
+
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_raises_without_jira_config(mock_load_config):
+    mock_load_config.return_value = _config(with_jira=False)
+
+    with pytest.raises(TaskError, match="no 'jira' block"):
+        create_task_from_jira_key("ISD-2")
+
+
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_raises_when_already_linked_to_workspace(mock_load_config):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="My task", ref="jira:ISD-2")]
+    )
+
+    with pytest.raises(TaskError, match="already linked to workspace 1 \\('My task'\\)"):
+        create_task_from_jira_key("ISD-2")
+
+
+@patch("et.task.fetch_issue", side_effect=JiraError("api down"))
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_wraps_fetch_issue_error(mock_load_config, _mock_fetch):
+    mock_load_config.return_value = _config()
+
+    with pytest.raises(TaskError, match="api down"):
+        create_task_from_jira_key("ISD-2")
+
+
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_delegates_to_create_task_workspace(
+    mock_load_config, mock_fetch_issue, mock_create_task_workspace, mock_ensure_sprint
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue(
+        "ISD-2", summary="A rather long issue summary here", status="In Progress"
+    )
+    mock_create_task_workspace.return_value = "created-result"
+
+    def confirm_grow(count: int) -> bool:
+        return True
+
+    result = create_task_from_jira_key("ISD-2", confirm_grow=confirm_grow)
+
+    assert result == "created-result"
+    mock_create_task_workspace.assert_called_once_with(
+        name="A rather long issue summary he",
+        description="A rather long issue summary here",
+        ref="jira:ISD-2",
+        confirm_grow=confirm_grow,
+    )
+    mock_ensure_sprint.assert_called_once()
+
+
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_raises_when_workspace_creation_cancelled(
+    mock_load_config, mock_fetch_issue, mock_create_task_workspace, _mock_ensure_sprint
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue("ISD-2", status="In Progress")
+    mock_create_task_workspace.return_value = None
+
+    with pytest.raises(TaskError, match="cancelled"):
+        create_task_from_jira_key("ISD-2")
+
+
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_skips_confirm_transition_when_already_in_progress(
+    mock_load_config, mock_fetch_issue, _mock_create_task_workspace, _mock_ensure_sprint
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue("ISD-2", status="In Progress")
+    confirm_transition = MagicMock()
+
+    create_task_from_jira_key("ISD-2", confirm_transition=confirm_transition)
+
+    confirm_transition.assert_not_called()
+
+
+@patch("et.task.transition_issue")
+@patch("et.task.fetch_transitions")
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_transitions_issue_when_confirmed(
+    mock_load_config,
+    mock_fetch_issue,
+    _mock_create_task_workspace,
+    _mock_ensure_sprint,
+    mock_fetch_transitions,
+    mock_transition_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue("ISD-2", status="To Do")
+    mock_fetch_transitions.return_value = [
+        JiraTransition(id="11", name="Start progress", to_status="In Progress"),
+    ]
+
+    create_task_from_jira_key("ISD-2", confirm_transition=lambda issue: True)
+
+    mock_fetch_transitions.assert_called_once_with(_config().jira, "ISD-2")
+    mock_transition_issue.assert_called_once_with(_config().jira, "ISD-2", "11")
+
+
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_calls_ensure_issue_in_active_sprint_with_config(
+    mock_load_config, mock_fetch_issue, _mock_create_task_workspace, mock_ensure_sprint
+):
+    config = _config()
+    mock_load_config.return_value = config
+    mock_fetch_issue.return_value = _issue("ISD-2", status="In Progress")
+    select_sprint = MagicMock()
+    warn = MagicMock()
+
+    create_task_from_jira_key("ISD-2", select_sprint=select_sprint, warn=warn)
+
+    mock_ensure_sprint.assert_called_once_with(config, config.jira, "ISD-2", select_sprint, warn)
+
+
+# --- ensure_issue_in_active_sprint -------------------------------------------
+
+
+def _sprint(sprint_id: str = "7", name: str = "Sprint 7") -> JiraSprint:
+    return JiraSprint(id=sprint_id, name=name)
+
+
+@patch("et.task.resolve_board_id")
+def test_ensure_issue_in_active_sprint_warns_without_project_key(mock_resolve_board_id):
+    jira = JiraConfig(
+        base_url="https://example.atlassian.net/",
+        email="me@example.com",
+        pat="secret-token",
+        jql="assignee = currentUser()",
+        project_key=None,
+    )
+    warn = MagicMock()
+
+    added = ensure_issue_in_active_sprint(
+        _config(), jira, "ISD-2", lambda sprints: sprints[0] if sprints else None, warn
+    )
+
+    assert added is False
+    warn.assert_called_once()
+    mock_resolve_board_id.assert_not_called()
+
+
+@patch("et.task.resolve_board_id", return_value=None)
+def test_ensure_issue_in_active_sprint_warns_when_board_unresolvable(mock_resolve_board_id):
+    jira = JiraConfig(
+        base_url="https://example.atlassian.net/",
+        email="me@example.com",
+        pat="secret-token",
+        jql="assignee = currentUser()",
+        project_key="ISD",
+    )
+    warn = MagicMock()
+
+    added = ensure_issue_in_active_sprint(
+        _config(), jira, "ISD-2", lambda sprints: sprints[0] if sprints else None, warn
+    )
+
+    assert added is False
+    warn.assert_called_once()
+    mock_resolve_board_id.assert_called_once_with(_config(), jira, "ISD")
+
+
+def _jira_with_project_key() -> JiraConfig:
+    return JiraConfig(
+        base_url="https://example.atlassian.net/",
+        email="me@example.com",
+        pat="secret-token",
+        jql="assignee = currentUser()",
+        project_key="ISD",
+    )
+
+
+@patch("et.task.fetch_active_sprints_or_warn", side_effect=TaskError("board issue"))
+@patch("et.task.resolve_board_id", return_value="42")
+def test_ensure_issue_in_active_sprint_warns_when_sprint_resolution_raises(
+    _mock_resolve_board_id, _mock_fetch_sprint_or_warn
+):
+    warn = MagicMock()
+
+    added = ensure_issue_in_active_sprint(
+        _config(),
+        _jira_with_project_key(),
+        "ISD-2",
+        lambda sprints: sprints[0] if sprints else None,
+        warn,
+    )
+
+    assert added is False
+    warn.assert_called_once_with("board issue")
+
+
+@patch("et.task.fetch_active_sprints_or_warn", return_value=[])
+@patch("et.task.resolve_board_id", return_value="42")
+def test_ensure_issue_in_active_sprint_returns_false_when_no_active_sprint(
+    _mock_resolve_board_id, _mock_fetch_sprint_or_warn
+):
+    added = ensure_issue_in_active_sprint(
+        _config(),
+        _jira_with_project_key(),
+        "ISD-2",
+        lambda sprints: sprints[0] if sprints else None,
+        MagicMock(),
+    )
+
+    assert added is False
+
+
+@patch("et.task.add_issue_to_sprint")
+@patch("et.task.fetch_issue_sprint")
+@patch("et.task.fetch_active_sprints_or_warn", return_value=[_sprint()])
+@patch("et.task.resolve_board_id", return_value="42")
+def test_ensure_issue_in_active_sprint_skips_when_already_in_active_sprint(
+    _mock_resolve_board_id, _mock_fetch_sprint_or_warn, mock_fetch_issue_sprint, mock_add
+):
+    mock_fetch_issue_sprint.return_value = _sprint()
+    select_sprint = MagicMock()
+
+    added = ensure_issue_in_active_sprint(
+        _config(), _jira_with_project_key(), "ISD-2", select_sprint, MagicMock()
+    )
+
+    assert added is False
+    select_sprint.assert_not_called()
+    mock_add.assert_not_called()
+
+
+@patch("et.task.add_issue_to_sprint")
+@patch("et.task.fetch_issue_sprint", return_value=None)
+@patch("et.task.fetch_active_sprints_or_warn", return_value=[_sprint()])
+@patch("et.task.resolve_board_id", return_value="42")
+def test_ensure_issue_in_active_sprint_skips_when_declined(
+    _mock_resolve_board_id, _mock_fetch_sprint_or_warn, _mock_fetch_issue_sprint, mock_add
+):
+    added = ensure_issue_in_active_sprint(
+        _config(), _jira_with_project_key(), "ISD-2", lambda sprints: None, MagicMock()
+    )
+
+    assert added is False
+    mock_add.assert_not_called()
+
+
+@patch("et.task.add_issue_to_sprint")
+@patch("et.task.fetch_issue_sprint", return_value=None)
+@patch("et.task.fetch_active_sprints_or_warn", return_value=[_sprint()])
+@patch("et.task.resolve_board_id", return_value="42")
+def test_ensure_issue_in_active_sprint_adds_when_confirmed(
+    _mock_resolve_board_id, _mock_fetch_sprint_or_warn, _mock_fetch_issue_sprint, mock_add
+):
+    added = ensure_issue_in_active_sprint(
+        _config(),
+        _jira_with_project_key(),
+        "ISD-2",
+        lambda sprints: sprints[0],
+        MagicMock(),
+    )
+
+    assert added is True
+    mock_add.assert_called_once_with(_jira_with_project_key(), "7", "ISD-2")
+
+
+@patch("et.task.add_issue_to_sprint", side_effect=JiraError("boom"))
+@patch("et.task.fetch_issue_sprint", return_value=None)
+@patch("et.task.fetch_active_sprints_or_warn", return_value=[_sprint()])
+@patch("et.task.resolve_board_id", return_value="42")
+def test_ensure_issue_in_active_sprint_wraps_add_error(
+    _mock_resolve_board_id, _mock_fetch_sprint_or_warn, _mock_fetch_issue_sprint, _mock_add
+):
+    with pytest.raises(TaskError, match="boom"):
+        ensure_issue_in_active_sprint(
+            _config(),
+            _jira_with_project_key(),
+            "ISD-2",
+            lambda sprints: sprints[0],
+            MagicMock(),
+        )
+
+
+@patch("et.task.fetch_issue_sprint", side_effect=JiraError("boom"))
+@patch("et.task.fetch_active_sprints_or_warn", return_value=[_sprint()])
+@patch("et.task.resolve_board_id", return_value="42")
+def test_ensure_issue_in_active_sprint_warns_when_fetch_issue_sprint_fails(
+    _mock_resolve_board_id, _mock_fetch_sprint_or_warn, _mock_fetch_issue_sprint
+):
+    warn = MagicMock()
+
+    added = ensure_issue_in_active_sprint(
+        _config(),
+        _jira_with_project_key(),
+        "ISD-2",
+        lambda sprints: sprints[0],
+        warn,
+    )
+
+    assert added is False
+    warn.assert_called_once()
 
 
 # --- complete_task_for_current_workspace ------------------------------------

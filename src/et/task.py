@@ -40,10 +40,17 @@ from et.config import (
     save_config,
 )
 from et.jira import (
+    JiraBoardWithoutSprintsError,
     JiraError,
     JiraIssue,
+    JiraSprint,
+    add_issue_to_sprint,
     create_comment,
+    discover_board_id,
     fetch_active_issues,
+    fetch_active_sprints,
+    fetch_issue,
+    fetch_issue_sprint,
     fetch_issue_status,
     fetch_transitions,
     transition_issue,
@@ -56,6 +63,7 @@ from et.ws import WsDeleteError, delete_active_workspace
 
 IN_PROGRESS_STATUS = "in progress"
 DONE_STATUS = "done"
+SCRUM_BOARD_TYPE = "scrum"
 BLOCKED_STATUS = "blocked"
 
 # Hardcoded, workflow-ordered (todo -> done) list of statuses offered by
@@ -299,6 +307,114 @@ def add_comment_to_current_workspace(body: str, *, issue_key: str | None = None)
     return resolved_key
 
 
+def persist_board_id(config: EtConfig, jira: JiraConfig, board_id: str) -> None:
+    """Save `board_id` as `jira.board_id`, so later runs skip board discovery."""
+    updated_jira = JiraConfig(
+        base_url=jira.base_url,
+        email=jira.email,
+        pat=jira.pat,
+        jql=jira.jql,
+        priority_order=jira.priority_order,
+        project_key=jira.project_key,
+        board_id=board_id,
+    )
+    save_config(EtConfig(jira=updated_jira, workspaces=config.workspaces))
+
+
+def resolve_board_id(config: EtConfig, jira: JiraConfig, project_key: str) -> str | None:
+    """Return `jira.board_id`, discovering and persisting it if not yet set.
+
+    Discovery prefers a Scrum board (`board_type="scrum"`), since only
+    Scrum boards support sprints — a Kanban board would otherwise get
+    cached here and later fail every sprint-related lookup with a
+    confusing "board does not support sprints" error. Shared by `et jira
+    create --sprint` (`jira_create.create_issue_interactive`) and `et jira
+    start -k` (`create_task_from_jira_key`).
+    """
+    if jira.board_id:
+        return jira.board_id
+
+    board_id = discover_board_id(jira, project_key, board_type=SCRUM_BOARD_TYPE)
+    if board_id is None:
+        return None
+
+    persist_board_id(config, jira, board_id)
+    return board_id
+
+
+def fetch_active_sprints_or_warn(
+    config: EtConfig,
+    jira: JiraConfig,
+    project_key: str,
+    board_id: str,
+    warn: Callable[[str], None],
+) -> list[JiraSprint]:
+    """Fetch active sprints on `board_id`, falling back to a fresh Scrum board lookup.
+
+    A board can have more than one concurrently active sprint, so this
+    returns the full list rather than assuming there's at most one —
+    callers that need to add an issue to "the" active sprint must let the
+    user pick among them when there's more than one.
+
+    If `board_id` (whether cached or just discovered) turns out not to
+    support sprints at all (Jira's board API rejects Kanban boards with a
+    "does not support sprints" 400), tries discovering a genuine Scrum
+    board for `project_key` and persisting it in its place. Raises
+    `TaskError` if that fallback also can't find a Scrum board, since
+    there's no sensible way to add the issue to a sprint at that point —
+    callers that treat an unresolvable board as a soft failure (rather
+    than `et jira create`'s hard failure) should catch this and warn
+    instead. Any other `JiraError` (network issue, no active sprint, etc.)
+    is reported via `warn` and treated as "skip the sprint" (empty list)
+    — this function owns all such warnings, so callers should not warn
+    again on an empty return. Shared by `et jira create --sprint` and `et
+    jira start -k`.
+    """
+    try:
+        sprints = fetch_active_sprints(jira, board_id)
+    except JiraBoardWithoutSprintsError:
+        fallback_board_id = discover_board_id(jira, project_key, board_type=SCRUM_BOARD_TYPE)
+        if fallback_board_id is None or fallback_board_id == board_id:
+            raise TaskError(
+                f"the configured Jira board (id {board_id}) does not support sprints, and no "
+                f"Scrum board could be found for project '{project_key}' (set jira.board_id "
+                "to a Scrum board's id manually, or decline the sprint prompt to skip it)"
+            ) from None
+        try:
+            sprints = fetch_active_sprints(jira, fallback_board_id)
+        except JiraError as exc:
+            warn(f"could not resolve the current sprint: {exc}")
+            return []
+        persist_board_id(config, jira, fallback_board_id)
+    except JiraError as exc:
+        warn(f"could not resolve the current sprint: {exc}")
+        return []
+
+    if not sprints:
+        warn("no active sprint found on the project's board; skipping sprint")
+    return sprints
+
+
+def _maybe_transition_to_in_progress(
+    jira_config: JiraConfig,
+    issue: JiraIssue,
+    confirm_transition: Callable[[JiraIssue], bool] | None,
+) -> None:
+    """Move `issue` to "In Progress" if it isn't already and `confirm_transition` agrees.
+
+    Shared by `create_task_from_jira` (interactive picker) and
+    `create_task_from_jira_key` (`-k/--key`): both offer the same
+    "not already In Progress? move it there" step before creating the
+    workspace.
+    """
+    if (
+        issue.status.strip().lower() != IN_PROGRESS_STATUS
+        and confirm_transition is not None
+        and confirm_transition(issue)
+    ):
+        _transition_to_status(jira_config, issue.key, IN_PROGRESS_STATUS, display="In Progress")
+
+
 def create_task_from_jira(
     select_issue: Callable[[list[JiraIssue]], JiraIssue | None],
     confirm_transition: Callable[[JiraIssue], bool] | None = None,
@@ -348,12 +464,7 @@ def create_task_from_jira(
     if issue is None:
         return None
 
-    if (
-        issue.status.strip().lower() != IN_PROGRESS_STATUS
-        and confirm_transition is not None
-        and confirm_transition(issue)
-    ):
-        _transition_to_status(config.jira, issue.key, IN_PROGRESS_STATUS, display="In Progress")
+    _maybe_transition_to_in_progress(config.jira, issue, confirm_transition)
 
     return create_task_workspace(
         name=truncate_summary(issue.summary),
@@ -361,6 +472,135 @@ def create_task_from_jira(
         ref=f"{JIRA_REF_PREFIX}{issue.key}",
         confirm_grow=confirm_grow,
     )
+
+
+def ensure_issue_in_active_sprint(
+    config: EtConfig,
+    jira: JiraConfig,
+    issue_key: str,
+    select_sprint: Callable[[list[JiraSprint]], JiraSprint | None],
+    warn: Callable[[str], None],
+) -> bool:
+    """Add `issue_key` to one of its project's current active sprints, if needed.
+
+    Used by `create_task_from_jira_key` (`et jira start -k`). Degrades
+    gracefully rather than failing the whole command: if `jira.project_key`
+    isn't set, no Agile board can be resolved/discovered for it, or no
+    sprint is currently active, `warn(...)` is called and this returns
+    `False` without touching the issue. If the issue is already in one of
+    the active sprints, returns `False` without prompting. Otherwise calls
+    `select_sprint(active_sprints)` — a board can have more than one
+    concurrently active sprint, so the caller is responsible for letting
+    the user pick one (or return `None` to skip) — and, if it returns a
+    sprint, adds the issue to it (raising `TaskError`, via `JiraError`, if
+    that call fails) and returns `True`; returns `False` if `None` is
+    returned instead.
+    """
+    project_key = jira.project_key
+    if not project_key:
+        warn(
+            "no 'jira.project_key' set in the config file; skipping the current-sprint check "
+            "(add it under the top-level 'jira:' key, e.g. project_key: ISD)"
+        )
+        return False
+
+    board_id = resolve_board_id(config, jira, project_key)
+    if board_id is None:
+        warn(
+            f"no Jira Agile board configured or discoverable for project '{project_key}'; "
+            "skipping the current-sprint check"
+        )
+        return False
+
+    try:
+        active_sprints = fetch_active_sprints_or_warn(config, jira, project_key, board_id, warn)
+    except TaskError as exc:
+        warn(str(exc))
+        return False
+
+    if not active_sprints:
+        return False
+
+    try:
+        current_sprint = fetch_issue_sprint(jira, issue_key)
+    except JiraError as exc:
+        warn(f"could not check {issue_key}'s current sprint: {exc}")
+        return False
+
+    active_sprint_ids = {sprint.id for sprint in active_sprints}
+    if current_sprint is not None and current_sprint.id in active_sprint_ids:
+        return False
+
+    chosen_sprint = select_sprint(active_sprints)
+    if chosen_sprint is None:
+        return False
+
+    try:
+        add_issue_to_sprint(jira, chosen_sprint.id, issue_key)
+    except JiraError as exc:
+        raise TaskError(str(exc)) from exc
+
+    return True
+
+
+def create_task_from_jira_key(
+    issue_key: str,
+    confirm_transition: Callable[[JiraIssue], bool] | None = None,
+    select_sprint: Callable[[list[JiraSprint]], JiraSprint | None] = (
+        lambda sprints: sprints[0] if sprints else None
+    ),
+    confirm_grow: Callable[[int], bool] = lambda count: False,
+    warn: Callable[[str], None] = lambda message: None,
+) -> TaskCreateResult:
+    """Create a task workspace from a Jira issue given directly by key.
+
+    Follows the same steps as `create_task_from_jira`'s interactive flow —
+    offering to move the issue to "In Progress" via `confirm_transition` if
+    it isn't already, then creating the workspace/timer and switching to
+    it via `create_task_workspace` — but for a specific `issue_key` instead
+    of one picked from the active-issues list. Additionally ensures the
+    issue is in one of its project's current active sprints via
+    `ensure_issue_in_active_sprint`, letting `select_sprint` pick among
+    them (or decline) if it isn't already in one (any board/sprint
+    resolution problem is reported via `warn` and skipped rather than
+    failing the command).
+
+    Raises `ConfigError` if the config file is missing/malformed,
+    `TaskError` if there's no `jira` config block or `issue_key` is already
+    linked to an existing workspace, and `JiraError` (via `TaskError`) if a
+    required Jira API call fails.
+    """
+    config: EtConfig = load_config()
+    if config.jira is None:
+        raise TaskError(
+            "no 'jira' block found in the config file "
+            "(add base_url/email/pat/jql under a top-level 'jira:' key)"
+        )
+
+    for index, entry in enumerate(config.workspaces):
+        if jira_key_from_ref(entry.ref) == issue_key:
+            raise TaskError(
+                f"{issue_key} is already linked to workspace {index + 1} ('{entry.name}')"
+            )
+
+    try:
+        issue = fetch_issue(config.jira, issue_key)
+    except JiraError as exc:
+        raise TaskError(str(exc)) from exc
+
+    _maybe_transition_to_in_progress(config.jira, issue, confirm_transition)
+
+    ensure_issue_in_active_sprint(config, config.jira, issue_key, select_sprint, warn)
+
+    result = create_task_workspace(
+        name=truncate_summary(issue.summary),
+        description=issue.summary,
+        ref=f"{JIRA_REF_PREFIX}{issue.key}",
+        confirm_grow=confirm_grow,
+    )
+    if result is None:
+        raise TaskError("workspace creation was cancelled (all workspaces already in use)")
+    return result
 
 
 def _free_workspace_slot(index: int) -> None:
@@ -495,6 +735,10 @@ __all__ = [
     "TaskCompleteResult",
     "create_task_workspace",
     "create_task_from_jira",
+    "create_task_from_jira_key",
+    "ensure_issue_in_active_sprint",
+    "resolve_board_id",
+    "fetch_active_sprints_or_warn",
     "complete_task_for_current_workspace",
     "set_status_for_current_workspace",
     "get_current_status_for_current_workspace",

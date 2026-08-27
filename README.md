@@ -131,6 +131,7 @@ working exactly as before.
 ```bash
 et info                                      # (or bare `et`) show the active task's Jira issue and time spent
 et jira start                                # pick an active Jira issue and start a task from it
+et jira start -k ISD-123                     # start a task for a specific issue key directly
 et jira create                               # interactively create a new Jira issue
 et jira log-time                             # log the active workspace's tracked time to Jira
 et jira log-time 2h                          # log a manually-specified 2h duration instead
@@ -164,6 +165,18 @@ asks whether to
 move it there (showing its current status) and does so via Jira's
 transitions API if you confirm.
 
+`et jira start -k KEY` (or `--key KEY`) starts a task for a specific Jira
+issue directly instead of picking one from the active-issues list — it
+fails if `KEY` is already linked to an existing workspace. It follows the
+same steps as above (offering to move the issue to "In Progress" if
+needed), plus one more: if the issue isn't already in one of its
+project's current active sprints, it asks whether to add it to one (using
+the same Agile board auto-discovery/caching as `et jira create --sprint`,
+and requiring `jira.project_key` to be set) — if the board has more than
+one concurrently active sprint, it prompts you to pick which one; if no
+board or active sprint can be resolved, it prints a warning and continues
+without touching the sprint rather than failing the command.
+
 `et jira create [GITHUB_URL]` interactively creates a new Jira issue in
 `jira.project_key` (required in config for this command). It prompts for:
 the issue type (`Bug`/`Story`/`Task`, default `Story` — defaulting to `Bug`
@@ -174,12 +187,13 @@ assign the issue to yourself (default yes, via your `jira.email`); priority
 picked from the project's component list; whether to add the issue to the
 project's current sprint (default yes — the Agile board is auto-discovered
 on first use and its id saved to `jira.board_id` so later runs skip that
-lookup); an estimate in hours (written to the issue's time-tracking
-original estimate); and an optional description (pre-filled from the
-GitHub issue/PR body when a URL is given, with the URL itself always
-appended as a reference). When `GITHUB_URL` is given, it's also written to
-the issue's "Bug link" field, if that custom field exists on the Jira
-instance (looked up by name, like the Sprint field — skipped with a
+lookup; if the board has more than one concurrently active sprint, you're
+prompted to pick which one); an estimate in hours (written to the issue's
+time-tracking original estimate); and an optional description (pre-filled
+from the GitHub issue/PR body when a URL is given, with the URL itself
+always appended as a reference). When `GITHUB_URL` is given, it's also
+written to the issue's "Bug link" field, if that custom field exists on
+the Jira instance (looked up by name, like the Sprint field — skipped with a
 warning otherwise). `GITHUB_URL` accepts
 `https://github.com/<owner>/<repo>/issues/<n>` and
 `https://github.com/<owner>/<repo>/pull/<n>` links, fetched via the `gh`
