@@ -777,8 +777,9 @@ def jira_log_time(
 
         for logged in all_results.logged:
             duration = format_duration(logged.seconds_logged)
+            summary_display = f" '{logged.summary}'" if logged.summary else ""
             typer.echo(
-                f"Logged {duration} to {_jira_ref_link(logged.issue_key)} "
+                f"Logged {duration} to {_jira_ref_link(logged.issue_key)}{summary_display} "
                 f"(workspace {logged.workspace_index + 1})"
             )
             if logged.tracker_reset:

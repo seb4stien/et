@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from et.config import EtConfig, JiraConfig, WorkspaceConfigEntry
-from et.jira import JiraError
+from et.jira import JiraError, JiraIssue
 from et.jira_time import (
     JiraLogTimeError,
     log_manual_time_for_current_workspace,
@@ -47,6 +47,10 @@ def _timer(workspace_id: int, elapsed: int, name: str = "ET-1") -> dict:
         "workspaceId": workspace_id,
         "autoResume": True,
     }
+
+
+def _issue(key: str, *, summary: str = "Some summary") -> JiraIssue:
+    return JiraIssue(key=key, summary=summary, priority="Medium", status="In Progress")
 
 
 @patch("et.jira_time.tracker.save_timers_with_reload")
@@ -339,12 +343,13 @@ def test_resolve_issue_key_falls_back_to_active_workspace_without_override(mock_
 # --- log_time_for_all_workspaces -------------------------------------------
 
 
+@patch("et.jira_time.fetch_issue")
 @patch("et.jira_time.tracker.save_timers_with_reload")
 @patch("et.jira_time.create_worklog")
 @patch("et.jira_time.tracker.load_timers")
 @patch("et.jira_time.load_config")
 def test_log_all_logs_and_resets_every_linked_workspace(
-    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers, mock_fetch_issue
 ):
     mock_load_config.return_value = _config(
         [
@@ -354,11 +359,13 @@ def test_log_all_logs_and_resets_every_linked_workspace(
         ]
     )
     mock_load_timers.return_value = [_timer(0, 3600), _timer(2, 1800, name="ET-3")]
+    mock_fetch_issue.side_effect = lambda _jira_config, key: _issue(key, summary=f"{key} summary")
 
     result = log_time_for_all_workspaces(description="Weekly sync")
 
     assert [r.issue_key for r in result.logged] == ["ISD-321", "ISD-654"]
     assert [r.seconds_logged for r in result.logged] == [3600, 1800]
+    assert [r.summary for r in result.logged] == ["ISD-321 summary", "ISD-654 summary"]
     assert all(r.tracker_reset for r in result.logged)
     assert result.skipped == []
 
@@ -371,6 +378,25 @@ def test_log_all_logs_and_resets_every_linked_workspace(
     )
     # One save per successfully-logged workspace, not batched.
     assert mock_save_timers.call_count == 2
+
+
+@patch("et.jira_time.fetch_issue", side_effect=JiraError("summary fetch failed"))
+@patch("et.jira_time.tracker.save_timers_with_reload")
+@patch("et.jira_time.create_worklog")
+@patch("et.jira_time.tracker.load_timers")
+@patch("et.jira_time.load_config")
+def test_log_all_falls_back_to_empty_summary_when_fetch_fails(
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers, mock_fetch_issue
+):
+    mock_load_config.return_value = _config(
+        [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
+    )
+    mock_load_timers.return_value = [_timer(0, 3600)]
+
+    result = log_time_for_all_workspaces()
+
+    assert result.logged[0].issue_key == "ISD-321"
+    assert result.logged[0].summary == ""
 
 
 @patch("et.jira_time.tracker.save_timers_with_reload")
@@ -415,12 +441,13 @@ def test_log_all_skips_workspace_with_no_timer(
     mock_save_timers.assert_not_called()
 
 
+@patch("et.jira_time.fetch_issue")
 @patch("et.jira_time.tracker.save_timers_with_reload")
 @patch("et.jira_time.create_worklog", side_effect=JiraError("boom"))
 @patch("et.jira_time.tracker.load_timers")
 @patch("et.jira_time.load_config")
 def test_log_all_skips_workspace_whose_jira_call_fails_but_logs_the_rest(
-    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers, mock_fetch_issue
 ):
     mock_load_config.return_value = _config(
         [
@@ -430,6 +457,7 @@ def test_log_all_skips_workspace_whose_jira_call_fails_but_logs_the_rest(
     )
     timers = [_timer(0, 3600), _timer(1, 1800, name="ET-2")]
     mock_load_timers.return_value = timers
+    mock_fetch_issue.return_value = _issue("ISD-654")
 
     def create_worklog_side_effect(_jira_config, key, *_args, **_kwargs):
         if key == "ISD-321":
@@ -473,17 +501,19 @@ def test_log_all_ignores_workspaces_with_no_linked_issue(
     mock_create_worklog.assert_not_called()
 
 
+@patch("et.jira_time.fetch_issue")
 @patch("et.jira_time.tracker.save_timers_with_reload")
 @patch("et.jira_time.create_worklog")
 @patch("et.jira_time.tracker.load_timers")
 @patch("et.jira_time.load_config")
 def test_log_all_does_not_reset_when_disabled(
-    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers
+    mock_load_config, mock_load_timers, mock_create_worklog, mock_save_timers, mock_fetch_issue
 ):
     mock_load_config.return_value = _config(
         [WorkspaceConfigEntry(name="ISD-321", ref="jira:ISD-321")]
     )
     mock_load_timers.return_value = [_timer(0, 3600)]
+    mock_fetch_issue.return_value = _issue("ISD-321")
 
     result = log_time_for_all_workspaces(reset=False)
 
