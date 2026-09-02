@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from et import tracker, workspaces
 from et.config import EtConfig, JiraConfig, load_config
-from et.jira import JiraError, create_worklog
+from et.jira import JiraError, create_worklog, fetch_issue
 from et.jira_ref import jira_key_from_ref
 from et.tracker import TrackerError
 
@@ -37,12 +37,19 @@ class JiraLogTimeError(RuntimeError):
 
 @dataclass(frozen=True)
 class LogTimeResult:
-    """Summary of what `log_time_for_current_workspace` did."""
+    """Summary of what `log_time_for_current_workspace` did.
+
+    `summary` is the Jira issue's summary text, best-effort fetched after
+    logging (empty string if not fetched, e.g. for
+    `log_time_for_current_workspace`/`log_manual_time_for_current_workspace`,
+    or if the fetch itself failed in `log_time_for_all_workspaces`).
+    """
 
     workspace_index: int
     issue_key: str
     seconds_logged: int
     tracker_reset: bool
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,6 +293,14 @@ def log_time_for_all_workspaces(
             )
             continue
 
+        # Best-effort: the time was already logged above, so a failure here
+        # (e.g. a transient network error) shouldn't be treated as a skip —
+        # just fall back to an empty summary.
+        try:
+            summary = fetch_issue(jira_config, issue_key).summary
+        except JiraError:
+            summary = ""
+
         if reset:
             timer["timeElapsed"] = 0
             timer["running"] = False
@@ -302,6 +317,7 @@ def log_time_for_all_workspaces(
                 issue_key=issue_key,
                 seconds_logged=seconds,
                 tracker_reset=reset,
+                summary=summary,
             )
         )
 

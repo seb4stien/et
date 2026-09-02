@@ -748,7 +748,11 @@ def test_jira_log_time_all_reports_logged_and_skipped_workspaces(
     mock_log_all.return_value = AllLogTimeResult(
         logged=[
             LogTimeResult(
-                workspace_index=0, issue_key="ISD-321", seconds_logged=3600, tracker_reset=True
+                workspace_index=0,
+                issue_key="ISD-321",
+                seconds_logged=3600,
+                tracker_reset=True,
+                summary="Epic summary",
             )
         ],
         skipped=[
@@ -763,8 +767,9 @@ def test_jira_log_time_all_reports_logged_and_skipped_workspaces(
 
     assert result.exit_code == 0
     mock_log_all.assert_called_once_with(reset=True)
-    assert "Logged 1h 0m 0s to <https://example.atlassian.net/browse/ISD-321|jira:ISD-321>" in (
-        result.stdout
+    assert (
+        "Logged 1h 0m 0s to <https://example.atlassian.net/browse/ISD-321|jira:ISD-321> "
+        "'Epic summary'" in result.stdout
     )
     assert "Reset tracker to 0" in result.stdout
     assert (
