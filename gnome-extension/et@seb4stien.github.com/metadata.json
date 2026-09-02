@@ -1,0 +1,7 @@
+{
+  "uuid": "et@seb4stien.github.com",
+  "name": "et",
+  "description": "D-Bus companion service for the et CLI (https://github.com/seb4stien/et). Exposes GNOME Shell state (currently: the active workspace index) that isn't otherwise reachable under Wayland.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/seb4stien/et"
+}

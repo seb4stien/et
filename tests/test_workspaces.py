@@ -36,16 +36,18 @@ WMCTRL_OUTPUT = (
 )
 
 
+@patch("et.workspaces._is_wayland_session", return_value=False)
 @patch("et.workspaces.shutil.which", return_value="/usr/bin/wmctrl")
 @patch("et.workspaces.subprocess.run")
-def test_get_active_workspace_index_returns_marked_index(mock_run, _mock_which):
+def test_get_active_workspace_index_returns_marked_index(mock_run, _mock_which, _mock_wayland):
     mock_run.return_value = _completed(stdout=WMCTRL_OUTPUT)
     assert get_active_workspace_index() == 1
 
 
+@patch("et.workspaces._is_wayland_session", return_value=False)
 @patch("et.workspaces.shutil.which", return_value="/usr/bin/wmctrl")
 @patch("et.workspaces.subprocess.run")
-def test_get_active_workspace_index_raises_when_no_marker(mock_run, _mock_which):
+def test_get_active_workspace_index_raises_when_no_marker(mock_run, _mock_which, _mock_wayland):
     mock_run.return_value = _completed(
         stdout="0  - DG: 1920x1080  VP: 0,0  WA: 0,0 1920x1055  Workspace 1\n"
     )
@@ -53,9 +55,97 @@ def test_get_active_workspace_index_raises_when_no_marker(mock_run, _mock_which)
         get_active_workspace_index()
 
 
+@patch("et.workspaces._is_wayland_session", return_value=False)
 @patch("et.workspaces.shutil.which", return_value=None)
-def test_get_active_workspace_index_raises_when_wmctrl_missing(_mock_which):
+def test_get_active_workspace_index_raises_when_wmctrl_missing(_mock_which, _mock_wayland):
     with pytest.raises(WorkspaceError, match="wmctrl"):
+        get_active_workspace_index()
+
+
+@pytest.mark.parametrize(
+    ("xdg_session_type", "wayland_display", "expected"),
+    [
+        ("wayland", "", True),
+        ("x11", "", False),
+        ("", "wayland-0", True),
+        ("", "", False),
+    ],
+)
+def test_is_wayland_session_detects_from_env(xdg_session_type, wayland_display, expected):
+    from et.workspaces import _is_wayland_session
+
+    env = {"XDG_SESSION_TYPE": xdg_session_type, "WAYLAND_DISPLAY": wayland_display}
+    with patch("et.workspaces.os.environ", env):
+        assert _is_wayland_session() is expected
+
+
+@patch("et.workspaces._is_wayland_session", return_value=True)
+@patch("et.workspaces.shutil.which", return_value="/usr/bin/gdbus")
+@patch("et.workspaces.subprocess.run")
+def test_get_active_workspace_index_uses_dbus_on_wayland(mock_run, _mock_which, _mock_wayland):
+    mock_run.return_value = _completed(stdout="(uint32 2,)\n")
+    assert get_active_workspace_index() == 2
+    mock_run.assert_called_once_with(
+        [
+            "gdbus",
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Shell",
+            "--object-path",
+            "/org/gnome/Shell/Extensions/Et",
+            "--method",
+            "org.gnome.Shell.Extensions.Et.GetActiveWorkspaceIndex",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@patch("et.workspaces._is_wayland_session", return_value=True)
+@patch("et.workspaces.shutil.which", return_value=None)
+def test_get_active_workspace_index_raises_when_gdbus_missing(_mock_which, _mock_wayland):
+    with pytest.raises(WorkspaceError, match="gdbus"):
+        get_active_workspace_index()
+
+
+@patch("et.workspaces._is_wayland_session", return_value=True)
+@patch("et.workspaces.shutil.which", return_value="/usr/bin/gdbus")
+@patch("et.workspaces.subprocess.run")
+def test_get_active_workspace_index_raises_helpful_message_when_extension_missing(
+    mock_run, _mock_which, _mock_wayland
+):
+    mock_run.return_value = _completed(
+        returncode=1,
+        stderr=(
+            "Error: GDBus.Error:org.freedesktop.DBus.Error.UnknownMethod: "
+            "No such interface \u201corg.gnome.Shell.Extensions.Et\u201d"
+        ),
+    )
+    with pytest.raises(WorkspaceError, match="et GNOME Shell extension"):
+        get_active_workspace_index()
+
+
+@patch("et.workspaces._is_wayland_session", return_value=True)
+@patch("et.workspaces.shutil.which", return_value="/usr/bin/gdbus")
+@patch("et.workspaces.subprocess.run")
+def test_get_active_workspace_index_raises_on_other_dbus_failure(
+    mock_run, _mock_which, _mock_wayland
+):
+    mock_run.return_value = _completed(returncode=1, stderr="some other dbus error")
+    with pytest.raises(WorkspaceError, match="gdbus call"):
+        get_active_workspace_index()
+
+
+@patch("et.workspaces._is_wayland_session", return_value=True)
+@patch("et.workspaces.shutil.which", return_value="/usr/bin/gdbus")
+@patch("et.workspaces.subprocess.run")
+def test_get_active_workspace_index_raises_when_output_unparseable(
+    mock_run, _mock_which, _mock_wayland
+):
+    mock_run.return_value = _completed(stdout="()\n")
+    with pytest.raises(WorkspaceError, match="could not parse"):
         get_active_workspace_index()
 
 

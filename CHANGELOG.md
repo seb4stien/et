@@ -6,6 +6,13 @@ All notable changes to `et` are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- A companion `et` GNOME Shell extension
+  (`gnome-extension/et@seb4stien.github.com`, installed via
+  `scripts/install-gnome-shell-extension.sh` / `just install-requirements`)
+  exposing a D-Bus service used to detect the active workspace on Wayland
+  sessions, where `wmctrl` (X11-only) no longer works. `et` now picks
+  `wmctrl` or this new D-Bus call automatically based on the detected
+  session type.
 - `et jira start -k KEY` (`--key`): start a task from a specific Jira issue
   key directly, skipping the active-issues picker (failing if `KEY` is
   already linked to a workspace). Follows the same steps as the

@@ -49,6 +49,8 @@ class FakeSystem:
             return self._run_gsettings(args)
         if program == "wmctrl":
             return self._run_wmctrl()
+        if program == "gdbus":
+            return self._run_gdbus(args)
         if program == "gnome-extensions":
             return self._run_gnome_extensions(args)
         raise AssertionError(f"unexpected command: {args!r}")
@@ -75,6 +77,12 @@ class FakeSystem:
             lines.append(f"{index}  {marker} DG: 1920x1080  VP: 0,0  WA: 0,0 1920x1080  W{index}")
         return self._completed(stdout="\n".join(lines) + "\n")
 
+    def _run_gdbus(self, args):
+        # Simulates the `et` GNOME Shell extension's D-Bus reply, used on
+        # Wayland sessions instead of `wmctrl -d`.
+        assert args[1] == "call"
+        return self._completed(stdout=f"(uint32 {self.active_workspace},)\n")
+
     def _run_gnome_extensions(self, args):
         action = args[1]
         if action == "list":
@@ -96,6 +104,21 @@ class FakeSystem:
 @pytest.fixture
 def system(tmp_path, monkeypatch):
     monkeypatch.setenv("ET_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    fake = FakeSystem()
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", side_effect=fake.run),
+    ):
+        yield fake
+
+
+@pytest.fixture
+def wayland_system(tmp_path, monkeypatch):
+    """Same as `system`, but simulating a Wayland session (uses gdbus, not wmctrl)."""
+    monkeypatch.setenv("ET_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
     fake = FakeSystem()
     with (
         patch("shutil.which", return_value="/usr/bin/fake"),
@@ -112,4 +135,15 @@ def test_ws_rename_persists_active_workspace_name(system):
     assert result.exit_code == 0, result.output
     assert "Renamed workspace 3 to 'focus'" in result.output
     assert system.read_string_array(*WORKSPACE_NAMES) == ["", "", "focus"]
+
+
+def test_ws_rename_persists_active_workspace_name_on_wayland(wayland_system):
+    wayland_system.active_workspace = 2
+
+    result = runner.invoke(app, ["ws", "rename", "focus"])
+
+    assert result.exit_code == 0, result.output
+    assert "Renamed workspace 3 to 'focus'" in result.output
+    assert wayland_system.read_string_array(*WORKSPACE_NAMES) == ["", "", "focus"]
+
 

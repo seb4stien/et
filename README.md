@@ -35,7 +35,8 @@ log time against them.
 - [`gsettings`](https://manpages.ubuntu.com/manpages/en/man1/gsettings.1.html)
   — read/write GNOME workspace names and the Tracker extension's timers.
 - [`wmctrl`](https://manpages.ubuntu.com/manpages/en/man1/wmctrl.1.html)
-  — detect the active workspace (`sudo apt install wmctrl`).
+  — detect the active workspace on **X11** sessions (`sudo apt install
+  wmctrl`). Not needed on Wayland — see below.
 - [`gnome-extensions`](https://manpages.ubuntu.com/manpages/en/man1/gnome-extensions.1.html)
   — reload the Tracker extension around timer writes.
 - The **Tracker** GNOME Shell extension (`tracker@aliakseiz.github.com`),
@@ -44,6 +45,29 @@ log time against them.
   needed for `et jira create <GITHUB_URL>`'s summary/description prefill.
 
 Python **3.12+** is required.
+
+### Wayland: the `et` GNOME Shell extension
+
+`wmctrl` relies on the X11 window-manager protocol, so it can't detect the
+active workspace on a Wayland session (the default since Ubuntu 26.04).
+Since GNOME Shell doesn't expose the active workspace over D-Bus by default,
+this repo ships a small companion extension,
+[`gnome-extension/et@seb4stien.github.com`](gnome-extension/et@seb4stien.github.com),
+that exposes it via a tiny D-Bus service `et` calls with `gdbus` instead of
+`wmctrl` when it detects a Wayland session (`XDG_SESSION_TYPE`/
+`WAYLAND_DISPLAY`).
+
+Install and enable it with:
+
+```bash
+scripts/install-gnome-shell-extension.sh
+```
+
+(this also runs automatically as part of `just install-requirements`). Log
+out and back in afterwards so GNOME Shell picks it up. This extension may
+grow additional D-Bus methods in later iterations — for example to
+eventually replace the third-party Tracker extension's time-tracking role
+with something maintained alongside `et` itself.
 
 ### Recommended: show workspace names in the switcher
 

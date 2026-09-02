@@ -1,6 +1,11 @@
+[private]
+default:
+    @just --list --unsorted
+
 install-requirements:
     uv sync --all-extras --dev
     uv run prek install
+    scripts/install-gnome-shell-extension.sh
 
 dev:
     uv run et --help
