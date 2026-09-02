@@ -63,9 +63,14 @@ Install and enable it with:
 scripts/install-gnome-shell-extension.sh
 ```
 
-(this also runs automatically as part of `just install-requirements`). Log
-out and back in afterwards so GNOME Shell picks it up. This extension may
-grow additional D-Bus methods in later iterations — for example to
+(this also runs automatically as part of `just install-requirements`). On a
+brand-new install, `gnome-extensions enable` may report the extension
+"does not exist" — this is expected the first time, since GNOME Shell only
+scans `~/.local/share/gnome-shell/extensions` for new UUIDs at startup; the
+script detects this and registers it as enabled directly instead. Either
+way, log out and back in afterwards so GNOME Shell picks it up. This
+extension may grow additional D-Bus methods in later iterations — for
+example to
 eventually replace the third-party Tracker extension's time-tracking role
 with something maintained alongside `et` itself.
 
