@@ -44,6 +44,32 @@ def test_is_extension_enabled_raises_when_binary_missing(_mock_which):
         is_extension_enabled(UUID)
 
 
+@patch("et.gnome_extensions.time.sleep")
+@patch("et.gnome_extensions.shutil.which", return_value="/usr/bin/gnome-extensions")
+@patch("et.gnome_extensions.subprocess.run")
+def test_is_extension_enabled_retries_then_succeeds(mock_run, _mock_which, mock_sleep):
+    mock_run.side_effect = [
+        _completed(stderr="Failed to connect to GNOME Shell", returncode=1),
+        _completed(stderr="Failed to connect to GNOME Shell", returncode=1),
+        _completed(stdout=f"{UUID}\n"),
+    ]
+    assert is_extension_enabled(UUID) is True
+    assert mock_run.call_count == 3
+    assert mock_sleep.call_count == 2
+    mock_sleep.assert_called_with(5)
+
+
+@patch("et.gnome_extensions.time.sleep")
+@patch("et.gnome_extensions.shutil.which", return_value="/usr/bin/gnome-extensions")
+@patch("et.gnome_extensions.subprocess.run")
+def test_is_extension_enabled_raises_after_max_attempts(mock_run, _mock_which, mock_sleep):
+    mock_run.return_value = _completed(stderr="Failed to connect to GNOME Shell", returncode=1)
+    with pytest.raises(GnomeExtensionsError, match="list failed"):
+        is_extension_enabled(UUID)
+    assert mock_run.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
 @patch("et.gnome_extensions.shutil.which", return_value="/usr/bin/gnome-extensions")
 @patch("et.gnome_extensions.subprocess.run")
 def test_disable_extension_raises_on_nonzero_exit(mock_run, _mock_which):

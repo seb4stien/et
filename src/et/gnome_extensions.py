@@ -13,8 +13,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+
+MAX_ATTEMPTS = 3
+RETRY_INTERVAL_SECONDS = 5
 
 
 class GnomeExtensionsError(RuntimeError):
@@ -22,14 +26,27 @@ class GnomeExtensionsError(RuntimeError):
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run `gnome-extensions <args>`, retrying transient failures.
+
+    A failure to reach the running GNOME Shell (e.g. right after a session
+    change, such as deleting a workspace) is often transient, so a failed
+    invocation is retried up to `MAX_ATTEMPTS` times, waiting
+    `RETRY_INTERVAL_SECONDS` between attempts, before giving up.
+    """
     if shutil.which("gnome-extensions") is None:
         raise GnomeExtensionsError("required command not found: gnome-extensions")
-    return subprocess.run(
-        ["gnome-extensions", *args],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        result = subprocess.run(
+            ["gnome-extensions", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 or attempt == MAX_ATTEMPTS:
+            return result
+        time.sleep(RETRY_INTERVAL_SECONDS)
+    raise AssertionError("unreachable: loop always returns or raises")
 
 
 def is_extension_enabled(uuid: str) -> bool:
