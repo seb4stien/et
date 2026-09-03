@@ -63,16 +63,30 @@ Install and enable it with:
 scripts/install-gnome-shell-extension.sh
 ```
 
-(this also runs automatically as part of `just install-requirements`). On a
-brand-new install, `gnome-extensions enable` may report the extension
-"does not exist" — this is expected the first time, since GNOME Shell only
-scans `~/.local/share/gnome-shell/extensions` for new UUIDs at startup; the
-script detects this and registers it as enabled directly instead. Either
-way, log out and back in afterwards so GNOME Shell picks it up. This
-extension may grow additional D-Bus methods in later iterations — for
-example to
-eventually replace the third-party Tracker extension's time-tracking role
-with something maintained alongside `et` itself.
+(this also runs automatically as part of `just install-requirements`). By
+default this *copies* the extension into
+`~/.local/share/gnome-shell/extensions/et@seb4stien.github.com` rather than
+symlinking it, so the installed copy keeps working even if this checkout is
+later re-provisioned (e.g. a fresh clone into a re-created workspace) on a
+timeline independent of your GNOME session — GNOME Shell only scans the
+extensions directory once at startup, and a symlink whose target doesn't
+exist yet at that exact moment gets silently skipped and never picked up
+until a full restart happens *after* the target exists. If you're actively
+editing `extension.js`, pass `--dev` (or `--symlink`) to symlink instead so
+you don't need to re-run the script after every change (a Shell restart is
+still required to pick up new code either way).
+
+`gnome-extensions enable` may report the extension "does not exist" the
+first time it's installed — this is expected, since GNOME Shell only scans
+`~/.local/share/gnome-shell/extensions` for new UUIDs at startup; the script
+detects this, registers it as enabled directly via `gsettings`, and checks
+the running Shell over D-Bus to tell you whether it has no record of the
+extension yet (needs a full restart) or already scanned it but hit an
+error. Either way, log out and back in afterwards (or `Alt+F2`, `r` on X11)
+so GNOME Shell picks it up. This extension may grow additional D-Bus
+methods in later iterations — for example to eventually replace the
+third-party Tracker extension's time-tracking role with something
+maintained alongside `et` itself.
 
 ### Recommended: show workspace names in the switcher
 

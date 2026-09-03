@@ -5,6 +5,19 @@ All notable changes to `et` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+- `scripts/install-gnome-shell-extension.sh` now *copies* the `et` GNOME
+  Shell extension into `~/.local/share/gnome-shell/extensions/` by default
+  instead of symlinking it, so it keeps working across workspace
+  re-provisioning that happens on a timeline independent of the GNOME
+  session (previously, if the symlink's target didn't exist yet at the
+  exact moment GNOME Shell scanned extensions at startup, the extension was
+  silently skipped and never loaded until an unrelated further restart).
+  Pass `--dev`/`--symlink` to opt back into symlinking, e.g. when actively
+  editing `extension.js`. The "not yet scanned" fallback message now also
+  queries the running Shell over D-Bus to distinguish "never scanned" from
+  "scanned but errored".
+
 ### Added
 - A companion `et` GNOME Shell extension
   (`gnome-extension/et@seb4stien.github.com`, installed via
