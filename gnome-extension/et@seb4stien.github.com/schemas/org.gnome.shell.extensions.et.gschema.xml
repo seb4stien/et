@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 Sébastien Georget
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+<schemalist gettext-domain="et@seb4stien.github.com">
+  <schema id="org.gnome.shell.extensions.et" path="/org/gnome/shell/extensions/et/">
+    <key name="workspaces" type="s">
+      <default>'{}'</default>
+      <summary>Persisted per-workspace counter state</summary>
+      <description>
+        Internal JSON-encoded store of extension-owned per-workspace counter
+        state (label, estimate, and elapsed seconds), keyed by workspace
+        index. Managed entirely by the extension and its D-Bus API; not
+        meant to be edited by hand.
+      </description>
+    </key>
+    <key name="show-label" type="b">
+      <default>true</default>
+      <summary>Show the workspace label</summary>
+      <description>
+        Show the generic workspace label (a descriptive workspace name) set
+        via SetWorkspaceMetadata/PrepareWorkspace, in the top panel and/or
+        the workspace switcher.
+      </description>
+    </key>
+    <key name="show-estimate" type="b">
+      <default>true</default>
+      <summary>Show the workspace estimate</summary>
+      <description>
+        Show the reference estimate duration set via
+        SetWorkspaceMetadata/PrepareWorkspace, in the top panel and/or the
+        workspace switcher.
+      </description>
+    </key>
+    <key name="show-counter" type="b">
+      <default>true</default>
+      <summary>Show the workspace counter</summary>
+      <description>
+        Show the live elapsed-time counter, in the top panel and/or the
+        workspace switcher.
+      </description>
+    </key>
+    <key name="show-panel" type="b">
+      <default>true</default>
+      <summary>Show the display in the top panel</summary>
+      <description>
+        Show the configured workspace label/estimate/counter as an
+        indicator in the GNOME top panel.
+      </description>
+    </key>
+    <key name="show-workspace-switcher" type="b">
+      <default>true</default>
+      <summary>Show the display in the workspace switcher</summary>
+      <description>
+        Show the configured workspace label/estimate/counter alongside
+        GNOME's workspace switcher popup.
+      </description>
+    </key>
+  </schema>
+</schemalist>

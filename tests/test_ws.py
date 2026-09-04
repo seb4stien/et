@@ -1,4 +1,4 @@
-"""Tests for et.ws, mocking et.config/et.workspaces/et.tracker."""
+"""Tests for et.ws, mocking et.config/et.workspaces/et.et_extension."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from unittest.mock import patch
 import pytest
 
 from et.config import ConfigError, EtConfig, WorkspaceConfigEntry
-from et.tracker import TrackerError
+from et.et_extension import (
+    EtExtensionError,
+    WorkspaceCounter,
+    WorkspaceCounterNotFoundError,
+)
 from et.workspaces import WorkspaceError
 from et.ws import (
     WsDeleteError,
@@ -29,55 +33,36 @@ def _config(
     return EtConfig(jira=None, workspaces=workspaces or [])
 
 
-def _timer(workspace_id: int, name: str, elapsed: int = 0, running: bool = False) -> dict:
-    return {
-        "id": f"timer-{workspace_id}",
-        "name": name,
-        "timeElapsed": elapsed,
-        "running": running,
-        "selected": False,
-        "workspaceId": workspace_id,
-        "autoResume": True,
-    }
-
-
 # --- shift_workspaces_left ---------------------------------------------------
 
 
-def test_shift_workspaces_left_moves_later_slots_and_timers():
+def test_shift_workspaces_left_moves_later_slots_and_returns_moves():
     workspaces_list = [
         WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
         WorkspaceConfigEntry(name="ET-2"),
         WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C", description="stuff"),
     ]
-    stale_timer = _timer(1, "ET-2", elapsed=0)
-    c_timer = _timer(2, "ET-3", elapsed=42, running=True)
-    entries = [stale_timer, c_timer]
 
-    changed = shift_workspaces_left(workspaces_list, entries, 1)
+    moves = shift_workspaces_left(workspaces_list, 1)
 
-    assert changed is True
+    assert moves == [(2, 1)]
     assert workspaces_list == [
         WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
         WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C", description="stuff"),
         WorkspaceConfigEntry(name="ET-3"),
     ]
-    assert stale_timer not in entries
-    assert c_timer in entries
-    assert c_timer["workspaceId"] == 1
-    assert c_timer["name"] == "ET-2"
 
 
 def test_shift_workspaces_left_noop_when_freed_is_static():
     workspaces_list = [WorkspaceConfigEntry(name="mails", type="static")]
-    changed = shift_workspaces_left(workspaces_list, [], 0)
-    assert changed is False
+    moves = shift_workspaces_left(workspaces_list, 0)
+    assert moves == []
 
 
 def test_shift_workspaces_left_noop_when_last_slot():
     workspaces_list = [WorkspaceConfigEntry(name="ET-1")]
-    changed = shift_workspaces_left(workspaces_list, [], 0)
-    assert changed is False
+    moves = shift_workspaces_left(workspaces_list, 0)
+    assert moves == []
 
 
 def test_shift_workspaces_left_preserves_destination_type():
@@ -86,12 +71,29 @@ def test_shift_workspaces_left_preserves_destination_type():
         WorkspaceConfigEntry(name="ET-2"),
         WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C"),
     ]
-    changed = shift_workspaces_left(workspaces_list, [], 1)
-    assert changed is False  # no timers to move
+    moves = shift_workspaces_left(workspaces_list, 1)
+    assert moves == [(2, 1)]
     assert workspaces_list == [
         WorkspaceConfigEntry(name="mails", type="static"),
         WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C"),
         WorkspaceConfigEntry(name="ET-3"),
+    ]
+
+
+def test_shift_workspaces_left_multi_slot_shift_returns_ordered_moves():
+    workspaces_list = [
+        WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
+        WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
+        WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C"),
+        WorkspaceConfigEntry(name="ISD-D", ref="jira:ISD-D"),
+    ]
+    moves = shift_workspaces_left(workspaces_list, 0)
+    assert moves == [(1, 0), (2, 1), (3, 2)]
+    assert workspaces_list == [
+        WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
+        WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C"),
+        WorkspaceConfigEntry(name="ISD-D", ref="jira:ISD-D"),
+        WorkspaceConfigEntry(name="ET-4"),
     ]
 
 
@@ -136,8 +138,8 @@ def test_trim_trailing_default_entries_stops_at_static():
 @patch("et.ws.workspaces.rename_all_workspaces")
 @patch("et.ws.workspaces.set_workspace_count")
 @patch("et.ws.save_config")
-@patch("et.ws.tracker.save_timers_with_reload")
-@patch("et.ws.tracker.load_timers")
+@patch("et.ws.et_extension.remap_workspaces")
+@patch("et.ws.et_extension.remove_workspace")
 @patch("et.ws.workspaces.get_workspace_count", return_value=3)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=1)
 @patch("et.ws.load_config")
@@ -145,8 +147,8 @@ def test_delete_active_workspace_shifts_and_shrinks(
     mock_load_config,
     _mock_active_index,
     _mock_get_count,
-    mock_load_timers,
-    mock_save_timers,
+    mock_remove,
+    mock_remap,
     mock_save_config,
     mock_set_count,
     mock_rename_all,
@@ -159,8 +161,6 @@ def test_delete_active_workspace_shifts_and_shrinks(
             WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C"),
         ]
     )
-    c_timer = _timer(2, "ET-3", elapsed=99)
-    mock_load_timers.return_value = [c_timer]
 
     result = delete_active_workspace()
 
@@ -177,18 +177,18 @@ def test_delete_active_workspace_shifts_and_shrinks(
     mock_rename_all.assert_called_once_with(["ISD-A", "ISD-C"])
     mock_switch.assert_called_once_with(1)
 
-    saved_timers = mock_save_timers.call_args[0][0]
-    assert c_timer in saved_timers
-    assert c_timer["workspaceId"] == 1
-    assert c_timer["name"] == "ET-2"
+    # The freed slot's own counter is discarded up front, before the shift's
+    # move (2 -> 1) relocates the later counter into place.
+    mock_remove.assert_called_once_with(1)
+    mock_remap.assert_called_once_with([(2, 1)])
 
 
 @patch("et.ws.workspaces.switch_to_workspace")
 @patch("et.ws.workspaces.rename_all_workspaces")
 @patch("et.ws.workspaces.set_workspace_count")
 @patch("et.ws.save_config")
-@patch("et.ws.tracker.save_timers_with_reload")
-@patch("et.ws.tracker.load_timers", return_value=[])
+@patch("et.ws.et_extension.remap_workspaces")
+@patch("et.ws.et_extension.remove_workspace")
 @patch("et.ws.workspaces.get_workspace_count", return_value=5)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=2)
 @patch("et.ws.load_config")
@@ -196,8 +196,8 @@ def test_delete_active_workspace_pads_implicit_slots(
     mock_load_config,
     _mock_active_index,
     _mock_get_count,
-    _mock_load_timers,
-    mock_save_timers,
+    mock_remove,
+    mock_remap,
     mock_save_config,
     mock_set_count,
     mock_rename_all,
@@ -218,7 +218,12 @@ def test_delete_active_workspace_pads_implicit_slots(
     mock_set_count.assert_called_once_with(4)
     mock_rename_all.assert_called_once_with(["ISD-A", "ET-2", "ET-3", "ET-4"])
     mock_switch.assert_called_once_with(2)
-    mock_save_timers.assert_not_called()
+    mock_remove.assert_called_once_with(2)
+    # Even though every shifted slot is a bare placeholder, the shift still
+    # reports moves (there's nothing content-bearing to distinguish an
+    # implicit slot from an explicit bare one), so the extension still gets
+    # an (empty-to-empty) remap call for them.
+    mock_remap.assert_called_once_with([(3, 2), (4, 3)])
 
 
 @patch("et.ws.workspaces.get_workspace_count", return_value=2)
@@ -268,17 +273,17 @@ def test_delete_active_workspace_rejects_last_remaining(
 @patch("et.ws.workspaces.rename_all_workspaces")
 @patch("et.ws.workspaces.set_workspace_count")
 @patch("et.ws.save_config")
-@patch("et.ws.tracker.save_timers_with_reload")
-@patch("et.ws.tracker.load_timers")
+@patch("et.ws.et_extension.remap_workspaces")
+@patch("et.ws.et_extension.remove_workspace")
 @patch("et.ws.workspaces.get_workspace_count", return_value=2)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=0)
 @patch("et.ws.load_config")
-def test_delete_active_workspace_force_discards_linked_ref_and_timer(
+def test_delete_active_workspace_force_discards_linked_ref_and_counter(
     mock_load_config,
     _mock_active_index,
     _mock_get_count,
-    mock_load_timers,
-    mock_save_timers,
+    mock_remove,
+    mock_remap,
     mock_save_config,
     mock_set_count,
     mock_rename_all,
@@ -290,9 +295,6 @@ def test_delete_active_workspace_force_discards_linked_ref_and_timer(
             WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
         ]
     )
-    a_timer = _timer(0, "ET-1", elapsed=500, running=True)
-    b_timer = _timer(1, "ET-2", elapsed=42)
-    mock_load_timers.return_value = [a_timer, b_timer]
 
     result = delete_active_workspace(force=True)
 
@@ -305,28 +307,25 @@ def test_delete_active_workspace_force_discards_linked_ref_and_timer(
     mock_rename_all.assert_called_once_with(["ISD-B"])
     mock_switch.assert_called_once_with(0)
 
-    saved_timers = mock_save_timers.call_args[0][0]
-    assert a_timer not in saved_timers  # discarded, not logged
-    assert b_timer in saved_timers
-    assert b_timer["workspaceId"] == 0
-    assert b_timer["name"] == "ET-1"
+    mock_remove.assert_called_once_with(0)
+    mock_remap.assert_called_once_with([(1, 0)])
 
 
 @patch("et.ws.workspaces.switch_to_workspace")
 @patch("et.ws.workspaces.rename_all_workspaces")
 @patch("et.ws.workspaces.set_workspace_count")
 @patch("et.ws.save_config")
-@patch("et.ws.tracker.save_timers_with_reload")
-@patch("et.ws.tracker.load_timers")
+@patch("et.ws.et_extension.remap_workspaces")
+@patch("et.ws.et_extension.remove_workspace")
 @patch("et.ws.workspaces.get_workspace_count", return_value=2)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=1)
 @patch("et.ws.load_config")
-def test_delete_active_workspace_force_last_slot_discards_timer(
+def test_delete_active_workspace_force_last_slot_discards_counter(
     mock_load_config,
     _mock_active_index,
     _mock_get_count,
-    mock_load_timers,
-    mock_save_timers,
+    mock_remove,
+    mock_remap,
     mock_save_config,
     mock_set_count,
     mock_rename_all,
@@ -338,8 +337,6 @@ def test_delete_active_workspace_force_last_slot_discards_timer(
             WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
         ]
     )
-    b_timer = _timer(1, "ET-2", elapsed=500)
-    mock_load_timers.return_value = [b_timer]
 
     result = delete_active_workspace(force=True)
 
@@ -351,19 +348,17 @@ def test_delete_active_workspace_force_last_slot_discards_timer(
     mock_rename_all.assert_called_once_with(["ISD-A"])
     mock_switch.assert_called_once_with(0)
     # Deleting the last non-static slot has nothing to shift, but the deleted
-    # workspace's own timer must still be discarded rather than orphaned.
-    mock_save_timers.assert_called_once()
-    saved_timers = mock_save_timers.call_args[0][0]
-    assert b_timer not in saved_timers
-    assert saved_timers == []
+    # workspace's own counter must still be discarded rather than orphaned.
+    mock_remove.assert_called_once_with(1)
+    mock_remap.assert_not_called()
 
 
 @patch("et.ws.workspaces.switch_to_workspace")
 @patch("et.ws.workspaces.rename_all_workspaces")
 @patch("et.ws.workspaces.set_workspace_count")
 @patch("et.ws.save_config")
-@patch("et.ws.tracker.save_timers_with_reload")
-@patch("et.ws.tracker.load_timers", return_value=[])
+@patch("et.ws.et_extension.remap_workspaces")
+@patch("et.ws.et_extension.remove_workspace")
 @patch("et.ws.workspaces.get_workspace_count", return_value=2)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=0)
 @patch("et.ws.load_config")
@@ -371,8 +366,8 @@ def test_delete_active_workspace_keeps_count_when_last_is_static(
     mock_load_config,
     _mock_active_index,
     _mock_get_count,
-    _mock_load_timers,
-    mock_save_timers,
+    _mock_remove,
+    _mock_remap,
     mock_save_config,
     mock_set_count,
     mock_rename_all,
@@ -435,22 +430,23 @@ def test_delete_active_workspace_propagates_config_error(_mock_load_config):
         delete_active_workspace()
 
 
-@patch("et.ws.tracker.load_timers", side_effect=TrackerError("tracker down"))
+@patch("et.ws.et_extension.remove_workspace", side_effect=EtExtensionError("extension down"))
 @patch("et.ws.workspaces.get_workspace_count", return_value=2)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=0)
 @patch("et.ws.load_config")
-def test_delete_active_workspace_wraps_tracker_error(
-    mock_load_config, _mock_active_index, _mock_get_count, _mock_load_timers
+def test_delete_active_workspace_wraps_extension_error(
+    mock_load_config, _mock_active_index, _mock_get_count, _mock_remove
 ):
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ET-1")])
-    with pytest.raises(WsDeleteError, match="tracker down"):
+    with pytest.raises(WsDeleteError, match="extension down"):
         delete_active_workspace()
 
 
 @patch("et.ws.workspaces.rename_all_workspaces", side_effect=WorkspaceError("rename boom"))
 @patch("et.ws.workspaces.set_workspace_count")
 @patch("et.ws.save_config")
-@patch("et.ws.tracker.load_timers", return_value=[])
+@patch("et.ws.et_extension.remap_workspaces")
+@patch("et.ws.et_extension.remove_workspace")
 @patch("et.ws.workspaces.get_workspace_count", return_value=2)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=0)
 @patch("et.ws.load_config")
@@ -458,7 +454,8 @@ def test_delete_active_workspace_wraps_workspace_error_during_apply(
     mock_load_config,
     _mock_active_index,
     _mock_get_count,
-    _mock_load_timers,
+    _mock_remove,
+    _mock_remap,
     _mock_save_config,
     _mock_set_count,
     _mock_rename_all,
@@ -483,25 +480,60 @@ def test_prepare_organize_pads_and_filters_static():
     assert slots == [1, 2, 3]
 
 
-def test_list_organize_candidates_pairs_entries_and_timers():
+@patch("et.ws.et_extension.get_workspace_counter")
+def test_list_organize_candidates_pairs_entries_and_counters(mock_get_counter):
     workspaces_list = [
         WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
         WorkspaceConfigEntry(name="ET-2"),
     ]
-    entries = [_timer(0, "ET-1", elapsed=99)]
-    candidates = list_organize_candidates(workspaces_list, [0, 1], entries)
+    counters = {
+        0: WorkspaceCounter(elapsed_seconds=99, running=False),
+        1: WorkspaceCounter(elapsed_seconds=0, running=False),
+    }
+    mock_get_counter.side_effect = lambda index: counters[index]
+
+    candidates = list_organize_candidates(workspaces_list, [0, 1])
+
     assert candidates[0].slot == 0
     assert candidates[0].entry.name == "ISD-A"
-    assert candidates[0].timer is entries[0]
+    assert candidates[0].counter == counters[0]
     assert candidates[1].slot == 1
-    assert candidates[1].timer is None
+    assert candidates[1].counter == counters[1]
+
+
+@patch("et.ws.et_extension.get_workspace_counter")
+def test_list_organize_candidates_allows_free_slot_without_counter(mock_get_counter):
+    workspaces_list = [
+        WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
+        WorkspaceConfigEntry(name="ET-2"),
+    ]
+    prepared = WorkspaceCounter(elapsed_seconds=99, running=False)
+    mock_get_counter.side_effect = [
+        prepared,
+        WorkspaceCounterNotFoundError("not prepared"),
+    ]
+
+    candidates = list_organize_candidates(workspaces_list, [0, 1])
+
+    assert candidates[0].counter == prepared
+    assert candidates[1].counter is None
+
+
+@patch(
+    "et.ws.et_extension.get_workspace_counter",
+    side_effect=EtExtensionError("extension down"),
+)
+def test_list_organize_candidates_propagates_extension_error(mock_get_counter):
+    workspaces_list = [WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A")]
+    with pytest.raises(EtExtensionError, match="extension down"):
+        list_organize_candidates(workspaces_list, [0])
 
 
 # --- parse_organize_order -----------------------------------------------------
 
 
 def test_parse_organize_order_happy_path():
-    lines = ["# comment", "", "2", "1\tISD-A\tISD-A\tno timer", "3"]
+    lines = ["# comment", "", "2", "1\tISD-A\tISD-A\t0h 0m 0s", "3"]
     assert parse_organize_order(lines, [0, 1, 2]) == [1, 0, 2]
 
 
@@ -537,34 +569,19 @@ def test_parse_organize_order_rejects_unparseable_line():
 # --- build_organize_plan ------------------------------------------------------
 
 
-def test_build_organize_plan_swap_moves_timers():
+def test_build_organize_plan_swap():
     workspaces_list = [
         WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
         WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
     ]
-    timer_a = _timer(0, "ET-1", elapsed=10)
-    timer_b = _timer(1, "ET-2", elapsed=20)
-    entries = [timer_a, timer_b]
 
-    plan = build_organize_plan(workspaces_list, entries, [0, 1], [1, 0])
+    plan = build_organize_plan(workspaces_list, [0, 1], [1, 0])
 
     by_new_slot = {row.new_slot: row for row in plan}
     assert by_new_slot[0].entry.name == "ISD-B"
     assert by_new_slot[0].old_slot == 1
-    assert by_new_slot[0].timer is not None
-    assert by_new_slot[0].timer["workspaceId"] == 0
-    assert by_new_slot[0].timer["name"] == "ET-1"
-    assert by_new_slot[0].timer["timeElapsed"] == 20
-
     assert by_new_slot[1].entry.name == "ISD-A"
-    assert by_new_slot[1].timer is not None
-    assert by_new_slot[1].timer["workspaceId"] == 1
-    assert by_new_slot[1].timer["name"] == "ET-2"
-    assert by_new_slot[1].timer["timeElapsed"] == 10
-
-    # Original timers must be untouched (build_organize_plan is pure).
-    assert timer_a["workspaceId"] == 0
-    assert timer_b["workspaceId"] == 1
+    assert by_new_slot[1].old_slot == 0
 
 
 def test_build_organize_plan_three_way_rotation():
@@ -573,10 +590,9 @@ def test_build_organize_plan_three_way_rotation():
         WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
         WorkspaceConfigEntry(name="ISD-C", ref="jira:ISD-C"),
     ]
-    entries = [_timer(0, "ET-1"), _timer(1, "ET-2"), _timer(2, "ET-3")]
 
     # new_order[i] = source slot landing at slots[i]: rotate right by one.
-    plan = build_organize_plan(workspaces_list, entries, [0, 1, 2], [2, 0, 1])
+    plan = build_organize_plan(workspaces_list, [0, 1, 2], [2, 0, 1])
 
     by_new_slot = {row.new_slot: row for row in plan}
     assert by_new_slot[0].entry.name == "ISD-C"
@@ -584,19 +600,17 @@ def test_build_organize_plan_three_way_rotation():
     assert by_new_slot[2].entry.name == "ISD-B"
 
 
-def test_build_organize_plan_noop_order_keeps_timer_identity():
+def test_build_organize_plan_noop_order_keeps_entries_in_place():
     workspaces_list = [
         WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
         WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
     ]
-    timer_a = _timer(0, "ET-1")
-    entries = [timer_a]
 
-    plan = build_organize_plan(workspaces_list, entries, [0, 1], [0, 1])
+    plan = build_organize_plan(workspaces_list, [0, 1], [0, 1])
 
     by_new_slot = {row.new_slot: row for row in plan}
-    assert by_new_slot[0].timer is timer_a
-    assert by_new_slot[1].timer is None
+    assert by_new_slot[0].old_slot == 0
+    assert by_new_slot[1].old_slot == 1
 
 
 def test_build_organize_plan_static_slots_excluded_from_slots_arg():
@@ -605,8 +619,7 @@ def test_build_organize_plan_static_slots_excluded_from_slots_arg():
         WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
         WorkspaceConfigEntry(name="ISD-B", ref="jira:ISD-B"),
     ]
-    entries: list[dict] = []
-    plan = build_organize_plan(workspaces_list, entries, [1, 2], [2, 1])
+    plan = build_organize_plan(workspaces_list, [1, 2], [2, 1])
     assert {row.old_slot for row in plan} == {1, 2}
     assert {row.new_slot for row in plan} == {1, 2}
     assert all(row.entry.type == "dynamic" for row in plan)
@@ -615,13 +628,7 @@ def test_build_organize_plan_static_slots_excluded_from_slots_arg():
 def test_build_organize_plan_rejects_non_permutation():
     workspaces_list = [WorkspaceConfigEntry(name="ISD-A"), WorkspaceConfigEntry(name="ISD-B")]
     with pytest.raises(WsOrganizeError):
-        build_organize_plan(workspaces_list, [], [0, 1], [0, 0])
-
-
-def test_build_organize_plan_entry_without_timer_produces_none_row():
-    workspaces_list = [WorkspaceConfigEntry(name="ISD-A"), WorkspaceConfigEntry(name="ISD-B")]
-    plan = build_organize_plan(workspaces_list, [], [0, 1], [1, 0])
-    assert all(row.timer is None for row in plan)
+        build_organize_plan(workspaces_list, [0, 1], [0, 0])
 
 
 # --- apply_organize_plan -------------------------------------------------------
@@ -629,9 +636,9 @@ def test_build_organize_plan_entry_without_timer_produces_none_row():
 
 @patch("et.ws.workspaces.rename_all_workspaces")
 @patch("et.ws.save_config")
-@patch("et.ws.tracker.save_timers_with_reload")
-def test_apply_organize_plan_saves_config_timers_and_names(
-    mock_save_timers, mock_save_config, mock_rename_all
+@patch("et.ws.et_extension.remap_workspaces")
+def test_apply_organize_plan_saves_config_counters_and_names(
+    mock_remap, mock_save_config, mock_rename_all
 ):
     config = _config(
         [
@@ -640,18 +647,11 @@ def test_apply_organize_plan_saves_config_timers_and_names(
         ]
     )
     workspaces_list = list(config.workspaces)
-    timer_a = _timer(0, "ET-1", elapsed=5)
-    timer_b = _timer(1, "ET-2", elapsed=15)
-    entries = [timer_a, timer_b]
 
-    plan = build_organize_plan(workspaces_list, entries, [0, 1], [1, 0])
-    apply_organize_plan(config, workspaces_list, entries, plan)
+    plan = build_organize_plan(workspaces_list, [0, 1], [1, 0])
+    apply_organize_plan(config, workspaces_list, plan)
 
-    mock_save_timers.assert_called_once()
-    saved_entries = mock_save_timers.call_args[0][0]
-    saved_by_workspace = {entry["workspaceId"]: entry for entry in saved_entries}
-    assert saved_by_workspace[0]["timeElapsed"] == 15
-    assert saved_by_workspace[1]["timeElapsed"] == 5
+    mock_remap.assert_called_once_with([(1, 0), (0, 1)])
 
     mock_save_config.assert_called_once()
     saved_config = mock_save_config.call_args[0][0]
@@ -661,9 +661,9 @@ def test_apply_organize_plan_saves_config_timers_and_names(
     mock_rename_all.assert_called_once_with(["ISD-B", "ISD-A"])
 
 
-@patch("et.ws.tracker.save_timers_with_reload")
+@patch("et.ws.et_extension.remap_workspaces")
 @patch("et.ws.save_config")
-def test_apply_organize_plan_skips_timer_save_when_noop(mock_save_config, mock_save_timers):
+def test_apply_organize_plan_skips_remap_when_noop(mock_save_config, mock_remap):
     config = _config(
         [
             WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
@@ -671,30 +671,44 @@ def test_apply_organize_plan_skips_timer_save_when_noop(mock_save_config, mock_s
         ]
     )
     workspaces_list = list(config.workspaces)
-    entries: list[dict] = []
-    plan = build_organize_plan(workspaces_list, entries, [0, 1], [0, 1])
+    plan = build_organize_plan(workspaces_list, [0, 1], [0, 1])
 
     with patch("et.ws.workspaces.rename_all_workspaces"):
-        apply_organize_plan(config, workspaces_list, entries, plan)
+        apply_organize_plan(config, workspaces_list, plan)
 
-    mock_save_timers.assert_not_called()
+    mock_remap.assert_not_called()
     mock_save_config.assert_called_once()
 
 
 @patch("et.ws.workspaces.rename_all_workspaces", side_effect=WorkspaceError("rename boom"))
 @patch("et.ws.save_config")
-def test_apply_organize_plan_wraps_workspace_error(_mock_save_config, _mock_rename_all):
+@patch("et.ws.et_extension.remap_workspaces")
+def test_apply_organize_plan_wraps_workspace_error(
+    _mock_remap, _mock_save_config, _mock_rename_all
+):
     config = _config([WorkspaceConfigEntry(name="ISD-A"), WorkspaceConfigEntry(name="ISD-B")])
     workspaces_list = list(config.workspaces)
-    plan = build_organize_plan(workspaces_list, [], [0, 1], [1, 0])
+    plan = build_organize_plan(workspaces_list, [0, 1], [1, 0])
     with pytest.raises(WsOrganizeError, match="rename boom"):
-        apply_organize_plan(config, workspaces_list, [], plan)
+        apply_organize_plan(config, workspaces_list, plan)
 
 
+@patch("et.ws.et_extension.remap_workspaces")
 @patch("et.ws.save_config", side_effect=ConfigError("bad write"))
-def test_apply_organize_plan_wraps_config_error(_mock_save_config):
+def test_apply_organize_plan_wraps_config_error(_mock_save_config, _mock_remap):
     config = _config([WorkspaceConfigEntry(name="ISD-A"), WorkspaceConfigEntry(name="ISD-B")])
     workspaces_list = list(config.workspaces)
-    plan = build_organize_plan(workspaces_list, [], [0, 1], [1, 0])
+    plan = build_organize_plan(workspaces_list, [0, 1], [1, 0])
     with pytest.raises(WsOrganizeError, match="bad write"):
-        apply_organize_plan(config, workspaces_list, [], plan)
+        apply_organize_plan(config, workspaces_list, plan)
+
+
+@patch("et.ws.workspaces.rename_all_workspaces")
+@patch("et.ws.save_config")
+@patch("et.ws.et_extension.remap_workspaces", side_effect=EtExtensionError("extension down"))
+def test_apply_organize_plan_wraps_extension_error(_mock_remap, _mock_save_config, _mock_rename):
+    config = _config([WorkspaceConfigEntry(name="ISD-A"), WorkspaceConfigEntry(name="ISD-B")])
+    workspaces_list = list(config.workspaces)
+    plan = build_organize_plan(workspaces_list, [0, 1], [1, 0])
+    with pytest.raises(WsOrganizeError, match="extension down"):
+        apply_organize_plan(config, workspaces_list, plan)

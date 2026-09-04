@@ -1,21 +1,21 @@
 """Logic for inspecting and renaming GNOME/Ubuntu workspaces.
 
 This module shells out to `wmctrl` (to find the active workspace on X11) or,
-on Wayland, to `gdbus` (to call the companion `et` GNOME Shell extension's
-D-Bus service, since `wmctrl` doesn't work under Wayland). It also uses, via
-`et.gsettings`, `gsettings` (to read/write GNOME's workspace-names setting).
-It has no Typer/CLI dependency so it can be unit tested by mocking
-`subprocess.run`.
+on Wayland, delegates to `et.et_extension` (the companion `et` GNOME Shell
+extension's D-Bus client), since `wmctrl` doesn't work under Wayland. It
+also uses, via `et.gsettings`, `gsettings` (to read/write GNOME's
+workspace-names/workspace-count settings). It has no Typer/CLI dependency
+so it can be unit tested by mocking `subprocess.run`.
 """
 
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 
-from et import gsettings
+from et import et_extension, gsettings
+from et.et_extension import EtExtensionError
 from et.gsettings import GSettingsError
 
 WORKSPACE_NAMES_SCHEMA = "org.gnome.desktop.wm.preferences"
@@ -23,11 +23,6 @@ WORKSPACE_NAMES_KEY = "workspace-names"
 NUM_WORKSPACES_KEY = "num-workspaces"
 MUTTER_SCHEMA = "org.gnome.mutter"
 DYNAMIC_WORKSPACES_KEY = "dynamic-workspaces"
-
-ET_EXTENSION_UUID = "et@seb4stien.github.com"
-ET_DBUS_DEST = "org.gnome.Shell"
-ET_DBUS_OBJECT_PATH = "/org/gnome/Shell/Extensions/Et"
-ET_DBUS_METHOD = "org.gnome.Shell.Extensions.Et.GetActiveWorkspaceIndex"
 
 
 class WorkspaceError(RuntimeError):
@@ -50,51 +45,13 @@ def _is_wayland_session() -> bool:
     return bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
-def _get_active_workspace_index_via_dbus() -> int:
-    """Return the active workspace index via the `et` extension's D-Bus call.
-
-    Used on Wayland, where `wmctrl` can't see the compositor's state.
-    """
-    _require_binary("gdbus")
-    result = subprocess.run(
-        [
-            "gdbus",
-            "call",
-            "--session",
-            "--dest",
-            ET_DBUS_DEST,
-            "--object-path",
-            ET_DBUS_OBJECT_PATH,
-            "--method",
-            ET_DBUS_METHOD,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if any(token in stderr for token in ("UnknownMethod", "UnknownObject", "UnknownInterface")):
-            raise WorkspaceError(
-                "the et GNOME Shell extension doesn't seem to be installed/enabled "
-                f"(`gdbus call` failed: {stderr}). Run "
-                "`scripts/install-gnome-shell-extension.sh` (or "
-                f"`gnome-extensions enable {ET_EXTENSION_UUID}`) and log back in."
-            )
-        raise WorkspaceError(f"gdbus call to {ET_DBUS_METHOD} failed: {stderr}")
-
-    match = re.search(r"uint32\s+(\d+)", result.stdout)
-    if match is None:
-        raise WorkspaceError(
-            f"could not parse active workspace index from gdbus output: {result.stdout!r}"
-        )
-    return int(match.group(1))
-
-
 def get_active_workspace_index() -> int:
     """Return the 0-based index of the currently active workspace."""
     if _is_wayland_session():
-        return _get_active_workspace_index_via_dbus()
+        try:
+            return et_extension.get_active_workspace_index()
+        except EtExtensionError as exc:
+            raise WorkspaceError(str(exc)) from exc
 
     _require_binary("wmctrl")
     result = subprocess.run(

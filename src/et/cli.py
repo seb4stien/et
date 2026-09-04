@@ -9,6 +9,14 @@ from typing import TYPE_CHECKING, cast
 import typer
 
 from et.config import ConfigError, load_config, load_workspace_names
+from et.duration import format_duration, parse_hours_to_seconds
+from et.et_extension import (
+    EtExtensionError,
+    WorkspaceCounter,
+    WorkspaceCounterNotFoundError,
+    get_workspace_counter,
+    sync_workspace_label,
+)
 from et.git_branch import (
     BRANCH_TYPES,
     GitBranchError,
@@ -41,13 +49,6 @@ from et.task import (
     create_task_from_jira_key,
     get_current_status_for_current_workspace,
     set_status_for_current_workspace,
-)
-from et.tracker import (
-    TrackerError,
-    find_timer_for_workspace,
-    format_duration,
-    load_timers,
-    parse_hours_to_seconds,
 )
 from et.workspaces import (
     WorkspaceError,
@@ -96,7 +97,7 @@ ws_app = typer.Typer(help="Interact with GNOME/Ubuntu workspaces.", no_args_is_h
 app.add_typer(ws_app, name="ws")
 
 jira_app = typer.Typer(
-    help="Convenience layer around ws (plus the Tracker/Jira integrations) for a single "
+    help="Convenience layer around ws (plus the counter/Jira integrations) for a single "
     "task's lifecycle.",
     no_args_is_help=True,
 )
@@ -189,7 +190,7 @@ def _show_active_workspace_info(ctx: typer.Context) -> None:
     _print_workspace_jira_info(index, config)
     try:
         _print_workspace_time_spent(index)
-    except TrackerError as error:
+    except EtExtensionError as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
 
@@ -205,7 +206,13 @@ def rename(
         help="Rename all workspaces using the 'workspaces' list from ~/.config/et/config.yaml.",
     ),
 ) -> None:
-    """Rename the current (active) workspace to NEW_NAME, or all workspaces with --all."""
+    """Rename the current (active) workspace to NEW_NAME, or all workspaces with --all.
+
+    Best-effort: if the renamed workspace is already tracked (prepared via
+    `et jira start` et al.), its displayed label is kept in sync with the
+    new name; untracked and `static` workspaces are unaffected, and the
+    counter itself is never touched.
+    """
     if all_workspaces:
         if new_name is not None:
             typer.echo("Error: NEW_NAME must not be given together with --all", err=True)
@@ -219,6 +226,7 @@ def rename(
             raise typer.Exit(code=1) from error
 
         for index, name in zip(indices, names, strict=True):
+            sync_workspace_label(index, name)
             typer.echo(f"Renamed workspace {index + 1} to '{name}'")
         return
 
@@ -232,6 +240,7 @@ def rename(
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
 
+    sync_workspace_label(index, new_name)
     typer.echo(f"Renamed workspace {index + 1} to '{new_name}'")
 
 
@@ -277,17 +286,14 @@ def _print_workspace_jira_info(index: int, config: EtConfig) -> None:
 
 
 def _print_workspace_time_spent(index: int) -> None:
-    """Print the elapsed time of the ET-<n> tracker bound to workspace `index`, if any."""
-    entries = load_timers()
-    timer = find_timer_for_workspace(entries, index)
-    if timer is None:
-        typer.echo("No tracker for this workspace.")
+    """Print the elapsed time of the extension counter bound to workspace `index`."""
+    try:
+        counter = get_workspace_counter(index)
+    except WorkspaceCounterNotFoundError:
+        typer.echo("No counter for this workspace.")
         return
-
-    elapsed = timer.get("timeElapsed", 0)
-    seconds = elapsed if isinstance(elapsed, (int, float)) else 0
-    running = " (running)" if timer.get("running") else ""
-    typer.echo(f"Time spent: {format_duration(seconds)}{running}")
+    running = " (running)" if counter.running else ""
+    typer.echo(f"Time spent: {format_duration(counter.elapsed_seconds)}{running}")
 
 
 @ws_app.command("delete")
@@ -295,7 +301,8 @@ def ws_delete(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Delete even if the workspace is still linked to a Jira issue; its tracker is lost.",
+        help="Delete even if the workspace is still linked to a Jira issue; its counter is "
+        "lost.",
     ),
 ) -> None:
     """Delete the active workspace, shifting later workspaces left to fill the gap.
@@ -303,9 +310,9 @@ def ws_delete(
     Only works when the active workspace is free (not `static`, and not
     linked to a Jira issue) — use `et jira complete` (or `et jira
     log-time`) first if it's still tracking something, or pass `--force`
-    to delete it anyway (its Tracker timer, if any, is discarded rather
-    than logged). Every non-static workspace after it (and its Tracker
-    timer) shifts one slot to the left, then the now-empty trailing slot is
+    to delete it anyway (its extension counter, if any, is discarded rather
+    than logged). Every non-static workspace after it (and its extension
+    counter) shifts one slot to the left, then the now-empty trailing slot is
     removed by decrementing GNOME's workspace count (unless the last
     workspace is `static`, in which case the count is left unchanged).
     """
@@ -322,19 +329,20 @@ def ws_delete(
     )
 
 
-def _format_organize_row(row: OrganizePlanRow) -> str:
+def _format_organize_row(
+    row: OrganizePlanRow, counters_by_slot: dict[int, WorkspaceCounter | None]
+) -> str:
     """Format one `OrganizePlanRow` for the `ws organize` confirmation summary."""
     key = jira_key_from_ref(row.entry.ref) or "-"
-    if row.timer is not None:
-        elapsed = row.timer.get("timeElapsed", 0)
-        seconds = elapsed if isinstance(elapsed, (int, float)) else 0
-        running = " (running)" if row.timer.get("running") else ""
-        timer_desc = f"{format_duration(seconds)}{running}"
+    counter = counters_by_slot[row.old_slot]
+    if counter is None:
+        counter_desc = "no counter"
     else:
-        timer_desc = "no timer"
+        running = " (running)" if counter.running else ""
+        counter_desc = f"{format_duration(counter.elapsed_seconds)}{running}"
     return (
         f"  {row.old_slot + 1:>3} -> {row.new_slot + 1:<3} "
-        f"{row.entry.name:<20} {key:<12} {timer_desc}"
+        f"{row.entry.name:<20} {key:<12} {counter_desc}"
     )
 
 
@@ -347,16 +355,15 @@ def ws_organize() -> None:
     (falling back to `vi`) on a text listing of the dynamic workspaces;
     reorder the lines (without adding, removing, or duplicating any) and
     save to express the desired new order. Shows a before/after summary
-    (slot, name, linked Jira issue, tracker time) and asks for confirmation
-    before applying anything. Each moved workspace's Tracker timer follows
-    it to its new slot. The active GNOME workspace's index is left
+    (slot, name, linked Jira issue, counter time) and asks for confirmation
+    before applying anything. Each moved workspace's extension counter
+    follows it to its new slot. The active GNOME workspace's index is left
     unchanged — whatever task ends up in that slot is simply what's shown.
     """
     try:
         config = load_config()
         count = get_workspace_count()
-        entries = load_timers()
-    except (ConfigError, WorkspaceError, TrackerError) as error:
+    except (ConfigError, WorkspaceError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
 
@@ -366,7 +373,12 @@ def ws_organize() -> None:
         typer.echo("Nothing to organize: fewer than 2 dynamic workspaces.")
         return
 
-    candidates = list_organize_candidates(workspaces_list, slots, entries)
+    try:
+        candidates = list_organize_candidates(workspaces_list, slots)
+    except EtExtensionError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    counters_by_slot = {candidate.slot: candidate.counter for candidate in candidates}
     editor_content = build_organize_editor_content(candidates)
 
     try:
@@ -381,23 +393,23 @@ def ws_organize() -> None:
         return
 
     try:
-        plan = build_organize_plan(workspaces_list, entries, slots, new_order)
+        plan = build_organize_plan(workspaces_list, slots, new_order)
     except WsOrganizeError as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
 
     typer.echo("Proposed workspace order:")
-    typer.echo("  old -> new name                 jira         timer")
+    typer.echo("  old -> new name                 jira         counter")
     for row in sorted(plan, key=lambda row: row.new_slot):
-        typer.echo(_format_organize_row(row))
+        typer.echo(_format_organize_row(row, counters_by_slot))
 
     if not typer.confirm("Apply this reordering?", default=False):
         typer.echo("Aborted.")
         return
 
     try:
-        apply_organize_plan(config, workspaces_list, entries, plan)
-    except (ConfigError, WorkspaceError, TrackerError, WsOrganizeError) as error:
+        apply_organize_plan(config, workspaces_list, plan)
+    except (ConfigError, WorkspaceError, EtExtensionError, WsOrganizeError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
 
@@ -408,8 +420,6 @@ def _print_task_created(result: TaskCreateResult) -> None:
     key = jira_key_from_ref(result.ref)
     ref_suffix = f" (linked to {key})" if key else ""
     typer.echo(f"Created workspace {result.workspace_index + 1}: '{result.name}'{ref_suffix}")
-    if not result.timer_created:
-        typer.echo(f"Tracker already existed for workspace {result.workspace_index + 1}")
     typer.echo(f"Switched to workspace {result.workspace_index + 1}")
     if not result.window_moved:
         typer.echo(
@@ -448,7 +458,7 @@ def jira_start(
         ),
     ),
 ) -> None:
-    """Start a new task: allocate a workspace slot, its Tracker timer, and switch to it.
+    """Start a new task: allocate a workspace slot, its extension counter, and switch to it.
 
     Lists your active Jira issues that aren't already linked to a
     workspace and lets you pick one (its summary becomes the workspace
@@ -712,7 +722,7 @@ def jira_log_time(
         None,
         metavar="[Xh]",
         help='Manually log this many hours (e.g. "2h" or "1.5h") instead of reading the '
-        "Tracker timer's elapsed time.",
+        "extension counter's elapsed time.",
     ),
     comment: str | None = typer.Option(
         None, "--comment", "-m", help="Worklog description/comment to attach in Jira."
@@ -720,7 +730,7 @@ def jira_log_time(
     no_reset: bool = typer.Option(
         False,
         "--no-reset",
-        help="Don't reset the tracker after logging (leaves its elapsed time as-is). "
+        help="Don't reset the counter after logging (leaves its elapsed time as-is). "
         "Only meaningful without a manual [Xh] duration.",
     ),
     all_workspaces: bool = typer.Option(
@@ -733,24 +743,24 @@ def jira_log_time(
 ) -> None:
     """Log the active task's tracked time to its Jira issue.
 
-    With no argument, reads the elapsed time from the ET-<n> Tracker timer
+    With no argument, reads the elapsed time from the extension counter
     bound to the active workspace, logs it as a Jira worklog for the linked
     issue (via Jira's own worklog API, which also shows up in Tempo
     timesheets when Tempo is configured to sync native Jira worklogs), and
-    resets the tracker to 0 afterwards (unless --no-reset is given).
+    resets the counter to 0 afterwards (unless --no-reset is given).
 
     Given an [Xh] duration (e.g. "et jira log-time 2h"), logs that duration
-    instead, without reading or resetting the Tracker timer at all.
+    instead, without reading or resetting the extension counter at all.
 
     With --all, loops over every workspace in the config's `workspaces`
     list that has a linked Jira issue (not just the active one) and logs
-    each one's own Tracker timer to its own issue, without switching GNOME
-    workspaces. Can't be combined with [Xh], --comment/-m, or -j/--jira,
-    which only make sense for a single workspace/issue.
+    each one's own extension counter to its own issue, without switching
+    GNOME workspaces. Can't be combined with [Xh], --comment/-m, or
+    -j/--jira, which only make sense for a single workspace/issue.
     """
     if hours is not None and no_reset:
         typer.echo(
-            "Error: --no-reset only applies when logging the Tracker timer's elapsed "
+            "Error: --no-reset only applies when logging the extension counter's elapsed "
             "time, not a manual [Xh] duration",
             err=True,
         )
@@ -782,8 +792,8 @@ def jira_log_time(
                 f"Logged {duration} to {_jira_ref_link(logged.issue_key)}{summary_display} "
                 f"(workspace {logged.workspace_index + 1})"
             )
-            if logged.tracker_reset:
-                typer.echo("Reset tracker to 0")
+            if logged.counter_reset:
+                typer.echo("Reset counter to 0")
         for skipped in all_results.skipped:
             typer.echo(
                 f"Skipped workspace {skipped.workspace_index + 1} "
@@ -810,8 +820,8 @@ def jira_log_time(
         f"Logged {duration} to {_jira_ref_link(result.issue_key)} "
         f"(workspace {result.workspace_index + 1})"
     )
-    if result.tracker_reset:
-        typer.echo("Reset tracker to 0")
+    if result.counter_reset:
+        typer.echo("Reset counter to 0")
 
 
 @jira_app.command("complete")

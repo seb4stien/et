@@ -2,8 +2,9 @@
 # Installs the et GNOME Shell extension into the current user's extensions
 # directory and enables it. Safe to re-run.
 #
-# The extension exposes a small D-Bus service that `et` uses on Wayland
-# sessions to find the active workspace, since `wmctrl` only works on X11.
+# The extension exposes GNOME Shell state and owns the per-workspace counters
+# used by the CLI. It also displays configurable workspace metadata and elapsed
+# time in the panel and workspace switcher.
 #
 # By default this *copies* the extension files so the installed copy is a
 # real, persistent directory: this repo's checkout can be re-provisioned
@@ -47,6 +48,10 @@ if ! command -v gsettings >/dev/null 2>&1; then
     echo "error: gsettings not found on PATH; is GNOME Shell installed?" >&2
     exit 1
 fi
+if ! command -v glib-compile-schemas >/dev/null 2>&1; then
+    echo "error: glib-compile-schemas not found on PATH; install GLib development tools" >&2
+    exit 1
+fi
 
 mkdir -p "${EXTENSIONS_DIR}"
 
@@ -68,7 +73,8 @@ else
         rm -f "${TARGET_DIR}"
     fi
 
-    if [ -d "${TARGET_DIR}" ] && diff -rq "${SOURCE_DIR}" "${TARGET_DIR}" >/dev/null 2>&1; then
+    if [ -d "${TARGET_DIR}" ] \
+        && diff -rq --exclude=gschemas.compiled "${SOURCE_DIR}" "${TARGET_DIR}" >/dev/null 2>&1; then
         echo "et extension already installed and up to date at ${TARGET_DIR}"
     else
         if [ -e "${TARGET_DIR}" ]; then
@@ -82,6 +88,11 @@ else
     fi
 fi
 
+# Copy/symlink installs bypass `gnome-extensions install`, so compile the
+# bundled schema explicitly. For --dev the target is a symlink and the compiled
+# file lands in the source tree; it is ignored by git.
+glib-compile-schemas "${TARGET_DIR}/schemas"
+
 # A running GNOME Shell only scans ~/.local/share/gnome-shell/extensions at
 # startup, so it doesn't know about a brand-new UUID yet: `gnome-extensions
 # enable` talks to the *live* shell process and fails with "does not exist"
@@ -92,8 +103,17 @@ if enable_err=$(gnome-extensions enable "${UUID}" 2>&1 >/dev/null); then
     echo "enabled ${UUID}"
     echo "note: if GNOME Shell was already running, log out/in (or Alt+F2, r on X11) for it to load."
 else
+    # `gsettings get` on an empty array prints the GVariant-annotated form
+    # `@as []` (needed since an empty array's element type can't otherwise
+    # be inferred from its contents) instead of plain `[]`; strip that
+    # leading `@<type> ` annotation before parsing so an empty
+    # enabled-extensions list doesn't crash this. Also print nothing (not
+    # an empty line) when the list is empty, so `mapfile` doesn't capture a
+    # stray blank element.
     mapfile -t current < <(gsettings get org.gnome.shell enabled-extensions \
-        | python3 -c "import ast, sys; print('\n'.join(ast.literal_eval(sys.stdin.read())))")
+        | python3 -c "import ast, re, sys
+items = ast.literal_eval(re.sub(r'^@\S+\s+', '', sys.stdin.read()))
+print('\n'.join(items)) if items else None")
     if [[ ! " ${current[*]} " == *" ${UUID} "* ]]; then
         current+=("${UUID}")
     fi
@@ -121,4 +141,3 @@ else
         echo "note: log out and back in (Wayland) — or Alt+F2, r on X11 — for GNOME Shell to load it."
     fi
 fi
-

@@ -60,6 +60,7 @@ class JiraIssue:
     summary: str
     priority: str
     status: str = ""
+    original_estimate_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -493,17 +494,39 @@ def fetch_issue_status(jira_config: JiraConfig, issue_key: str) -> str:
     return name
 
 
-def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
-    """Return `issue_key`'s summary, priority, and status as a `JiraIssue`.
+def _parse_original_estimate_seconds(fields: dict[str, object]) -> int | None:
+    """Return `fields.timetracking.originalEstimateSeconds` if it's a valid duration.
 
-    Calls Jira's `GET /rest/api/3/issue/{key}?fields=summary,priority,status`
+    Must be present and a nonnegative `int` (explicitly excluding `bool`,
+    which is a subclass of `int` in Python) to be considered valid;
+    otherwise returns `None` rather than raising, since a missing/malformed
+    estimate shouldn't fail the whole issue fetch.
+    """
+    timetracking = fields.get("timetracking")
+    if not isinstance(timetracking, dict):
+        return None
+
+    value = timetracking.get("originalEstimateSeconds")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+
+    return value
+
+
+def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
+    """Return `issue_key`'s summary, priority, status, and original estimate as a `JiraIssue`.
+
+    Calls Jira's
+    `GET /rest/api/3/issue/{key}?fields=summary,priority,status,timetracking`
     endpoint. Used by `et jira start -k` to look up an issue given directly
     by key, rather than picked from `fetch_active_issues`'s candidate list.
     Raises `JiraError` if the request cannot be made, Jira rejects it, or
     the response has no usable summary/status.
     """
     url = _jira_url(jira_config, f"{ISSUE_PATH}/{issue_key}")
-    payload = _get_json(jira_config, url, params={"fields": "summary,priority,status"})
+    payload = _get_json(
+        jira_config, url, params={"fields": "summary,priority,status,timetracking"}
+    )
     if not isinstance(payload, dict):
         raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
 
@@ -528,6 +551,7 @@ def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
         summary=summary,
         priority=priority if isinstance(priority, str) else "",
         status=status,
+        original_estimate_seconds=_parse_original_estimate_seconds(fields),
     )
 
 
@@ -570,7 +594,10 @@ def _fetch_issue_pages(jira_config: JiraConfig, url: str) -> list[object]:
     next_page_token: str | None = None
 
     while True:
-        params: dict[str, str] = {"jql": jira_config.jql, "fields": "summary,priority,status"}
+        params: dict[str, str] = {
+            "jql": jira_config.jql,
+            "fields": "summary,priority,status,timetracking",
+        }
         if next_page_token is not None:
             params["nextPageToken"] = next_page_token
 
@@ -675,6 +702,7 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
                 summary=fields.get("summary") or "",
                 priority=priority_field.get("name") or "",
                 status=status_field.get("name") or "",
+                original_estimate_seconds=_parse_original_estimate_seconds(fields),
             )
         )
 

@@ -1,10 +1,9 @@
 # et
 
 `et` is a small command-line tool for **tracking effort** and **managing your
-Ubuntu/GNOME workspaces**. It renames GNOME workspaces, drives the
-[Tracker](https://extensions.gnome.org/extension/3212/tracker/) GNOME Shell
-extension's per-workspace timers, and can link workspaces to Jira issues to
-log time against them.
+Ubuntu/GNOME workspaces**. It renames GNOME workspaces, automatically tracks
+time spent on managed workspaces through its own GNOME Shell extension, and
+can link workspaces to Jira issues to log time against them.
 
 ## Features
 
@@ -14,7 +13,7 @@ log time against them.
 - **`et ws rename`** — rename the active workspace (or all of them from config).
 - **`et ws delete`** — delete the active (free) workspace, shifting later ones left.
 - **`et jira [start|create|log-time|complete|comment|status]`** — a friendlier,
-  task-centric layer that creates a workspace + Tracker timer for a task
+  task-centric layer that creates a workspace + automatic counter for a task
   (picked straight from your active Jira issues, optionally moving it to "In
   Progress"), interactively creates new Jira issues (optionally pre-filled
   from a GitHub issue/PR URL), completes a task by logging its tracked time
@@ -33,29 +32,45 @@ log time against them.
 `PATH`:
 
 - [`gsettings`](https://manpages.ubuntu.com/manpages/en/man1/gsettings.1.html)
-  — read/write GNOME workspace names and the Tracker extension's timers.
+  — read/write GNOME workspace names and settings.
+- [`gdbus`](https://manpages.ubuntu.com/manpages/en/man1/gdbus.1.html)
+  — communicate with the `et` GNOME Shell extension.
 - [`wmctrl`](https://manpages.ubuntu.com/manpages/en/man1/wmctrl.1.html)
   — detect the active workspace on **X11** sessions (`sudo apt install
   wmctrl`). Not needed on Wayland — see below.
 - [`gnome-extensions`](https://manpages.ubuntu.com/manpages/en/man1/gnome-extensions.1.html)
-  — reload the Tracker extension around timer writes.
-- The **Tracker** GNOME Shell extension (`tracker@aliakseiz.github.com`),
-  installed and enabled, for `et jira`'s timer functionality.
+  — install, enable, and configure the bundled extension.
+- The bundled **et Workspace Timer** GNOME Shell extension
+  (`et@seb4stien.github.com`), installed and enabled. It supports the GNOME
+  Shell releases used by Ubuntu 24.04 and Ubuntu 26.04 (GNOME 46 and 50).
 - [`gh`](https://cli.github.com/) — installed and authenticated, only
   needed for `et jira create <GITHUB_URL>`'s summary/description prefill.
 
 Python **3.12+** is required.
 
-### Wayland: the `et` GNOME Shell extension
+### The `et` GNOME Shell extension
 
 `wmctrl` relies on the X11 window-manager protocol, so it can't detect the
 active workspace on a Wayland session (the default since Ubuntu 26.04).
 Since GNOME Shell doesn't expose the active workspace over D-Bus by default,
-this repo ships a small companion extension,
+this repo ships a companion extension,
 [`gnome-extension/et@seb4stien.github.com`](gnome-extension/et@seb4stien.github.com),
-that exposes it via a tiny D-Bus service `et` calls with `gdbus` instead of
-`wmctrl` when it detects a Wayland session (`XDG_SESSION_TYPE`/
-`WAYLAND_DISPLAY`).
+that exposes Shell state through D-Bus. It also owns the per-workspace counters:
+when an `et`-managed `dynamic` workspace is active, its counter runs
+automatically; switching away or locking the session pauses it, and returning
+or unlocking resumes it. Ordinary keyboard/mouse inactivity still counts.
+
+The extension is ticket-system agnostic. The CLI can give it a workspace label
+and reference estimate (for Jira workspaces these are the issue summary and
+original estimate), but the extension treats them as generic display values.
+Its preferences independently control whether the label, estimate, and current
+counter appear, and whether the display is shown in the top panel and GNOME
+workspace switcher. The default is to show the label, original estimate, and
+counter on both surfaces.
+Whenever the top panel display is enabled, a small icon is always shown there
+as a persistent indicator that the extension is installed and active, even
+before any workspace has been prepared; the label/estimate/counter text is
+appended alongside it once a workspace has one.
 
 Install and enable it with:
 
@@ -83,33 +98,44 @@ detects this, registers it as enabled directly via `gsettings`, and checks
 the running Shell over D-Bus to tell you whether it has no record of the
 extension yet (needs a full restart) or already scanned it but hit an
 error. Either way, log out and back in afterwards (or `Alt+F2`, `r` on X11)
-so GNOME Shell picks it up. This extension may grow additional D-Bus
-methods in later iterations — for example to eventually replace the
-third-party Tracker extension's time-tracking role with something
-maintained alongside `et` itself.
+so GNOME Shell picks it up.
 
-### Recommended: show workspace names in the switcher
-
-Since `et` names your workspaces after tasks/Jira issues, it helps to see
-those names in GNOME's workspace switcher popup. Install the
-[**Workspace Switcher Manager**](https://extensions.gnome.org/extension/4788/workspace-switcher-manager/)
-extension (`workspace-switcher-manager@G-dH.github.com`), then configure it
-to display the workspace name (it shows only the index/app name by default):
+Open its preferences with:
 
 ```bash
-S=org.gnome.shell.extensions.workspace-switcher-manager
-gsettings set $S active-show-ws-name true       # show the name on the active workspace
-gsettings set $S inactive-show-ws-name true     # ...and on the others
-gsettings set $S active-show-app-name false     # drop the focused-app name
-gsettings set $S inactive-show-app-name false
-gsettings set $S popup-width-scale 200          # widen the popup so names fit
+gnome-extensions prefs et@seb4stien.github.com
 ```
 
-The workspace index stays visible (`active-show-ws-index`, on by default).
-The rest is personal taste — you can also tweak the popup position
-(`horizontal`/`vertical`), corner radius (`popup-radius-scale`), on-screen
-time (`on-screen-time`), and font size (`font-scale`) from the extension's
-preferences.
+### Testing the extension
+
+The extension has three test layers:
+
+- `just test` runs the Python suite and deterministic GJS unit tests for the
+  extension's persisted counter store and display formatting. These tests do
+  not start GNOME Shell or access the host's GNOME settings.
+- `just test-extension-live` starts a real headless GNOME Shell and exercises
+  the complete D-Bus lifecycle, including timing, remapping, persistence, and
+  disable/re-enable cleanup. It uses a disposable HOME and XDG tree.
+- `just test-extension` starts an interactive nested Wayland Shell for visual
+  checks. The extension, dconf database, caches, runtime directory, and enabled
+  extension list all live under a temporary directory that is deleted on exit;
+  nothing is installed into the host user's extension directory. A working
+  user systemd session is required so every helper daemon is reaped.
+
+GitHub Actions runs the real-Shell lifecycle test on Ubuntu 24.04/GNOME 46 and
+Ubuntu 26.04/GNOME 50, matching `metadata.json`.
+
+For full-desktop visual compatibility checks, use disposable GNOME Boxes or
+QEMU snapshots for both Ubuntu releases:
+
+1. Build the test artifact with `just package-extension`.
+2. Restore a clean VM snapshot and copy
+   `dist/et@seb4stien.github.com.shell-extension.zip` into the VM.
+3. Install the ZIP with `gnome-extensions install --force <zip>`, log out and
+   back in, then enable the extension.
+4. Check preferences, the top-panel display, workspace-switcher labels,
+   workspace changes, lock/unlock counter pausing, and disable/re-enable.
+5. Revert the VM snapshot after the test.
 
 ## Installation
 
@@ -149,25 +175,25 @@ both fall back to the usual help text.
 et ws rename focus          # rename the active workspace to "focus"
 et ws rename --all          # rename workspaces 0..n-1 from the config's "workspaces" list
 et ws delete                # delete the active workspace, shifting later ones left
-et ws delete --force        # same, even if still linked to a Jira issue (tracker is lost)
+et ws delete --force        # same, even if still linked to a Jira issue (counter is lost)
 ```
 
 `et ws delete` frees a workspace slot. It only works on a
 "free" workspace — not `static`, and not linked to a Jira issue (run `et
 jira complete` first if it still is). Every non-`static` workspace after the
-deleted one (and its Tracker timer) shifts one slot to the left to close the
+deleted one (and its counter) shifts one slot to the left to close the
 gap, then the now-empty trailing slot is reclaimed by decrementing GNOME's
 workspace count (`num-workspaces`). The exception is when the
 highest-numbered workspace is `static` — shrinking would swallow it, so the
 count is left unchanged and the freed slot just becomes a bare `ET-<n>`.
 Refuses to delete the last remaining workspace. `--force` bypasses the
-Jira-linked check for assigned/in-progress workspaces — its Tracker timer is
+Jira-linked check for assigned/in-progress workspaces — its counter is
 discarded rather than logged, so log the time first if you need it (`--force`
 never bypasses the `static` check).
 
 ### Tasks
 
-`et jira` wraps the workspace/Tracker/Jira integrations into a single
+`et jira` wraps the workspace timer and Jira integrations into a single
 lifecycle for one task at a time — it doesn't replace `ws`, which keeps
 working exactly as before.
 
@@ -186,7 +212,7 @@ et jira complete                             # log time, then optionally delete 
 ```
 
 `et` with no subcommand shows the same Jira issue details as before, plus
-the elapsed time of the `ET-<n>` Tracker timer bound to the active
+the elapsed time of the counter bound to the active
 workspace (e.g. `Time spent: 1h 12m 0s`, with `(running)` appended if the
 timer is currently running) — but only when the active workspace is part
 of the managed (non-`static`) pool; otherwise it shows this help text.
@@ -195,7 +221,7 @@ of the managed (non-`static`) pool; otherwise it shows this help text.
 slot from the fixed pool of GNOME workspaces. If every workspace is already
 taken, it asks whether to add one more (bumping GNOME's `num-workspaces` by
 one) — decline and the command cancels without changing anything. It then
-creates the slot's `ET-<n>` Tracker timer, and
+prepares the slot's automatic counter and display metadata, and
 switches GNOME to it, best-effort moving the terminal window it was run
 from along with it (via `wmctrl -r :ACTIVE:`) so it doesn't get left
 behind on the old workspace. That last step needs an addressable X11
@@ -244,25 +270,25 @@ CLI (which must be installed and authenticated) — if the URL can't be
 parsed or fetched, `et jira create` warns and falls back to blank
 defaults rather than failing outright.
 
-`et jira log-time` reads the elapsed time from the `ET-<n>` Tracker timer
+`et jira log-time` reads the elapsed time from the active workspace's counter
 bound to the active workspace, resolves the Jira issue linked to that
 workspace (its `ref`, e.g. set by `et jira start`), and logs it as a
 worklog via Jira's own worklog API (no separate Tempo credential needed —
 worklogs created this way still show up in Tempo timesheets when Tempo is
 configured to sync native Jira worklogs). At least a minute of elapsed time
-is required. On success the tracker is reset to 0, unless `--no-reset` is
+is required. On success the counter is reset to 0, unless `--no-reset` is
 given. Given an `Xh` duration instead (e.g. `et jira log-time 2h` or `et
 jira log-time 1.5h`), that duration is logged manually rather than the
-Tracker timer's elapsed time — the Tracker timer isn't read or reset in
+workspace counter's elapsed time — the counter isn't read or reset in
 that case (so `--no-reset` doesn't apply).
 
 `et jira log-time --all` logs every workspace in the `workspaces` config
 list that has a linked Jira issue, instead of only the active one —
 useful for logging a whole day's tracked time across every task at once
-without switching between workspaces. Each linked workspace's own Tracker
-timer is logged to its own issue and reset immediately on success (or left
+without switching between workspaces. Each linked workspace's own counter is
+logged to its own issue and reset immediately on success (or left
 untouched otherwise); a workspace with less than a minute of elapsed time,
-no Tracker timer at all, or a failing Jira call is skipped (reported at the
+no prepared counter, or a failing Jira call is skipped (reported at the
 end) rather than stopping the rest from being logged. `--no-reset` still
 applies (to every workspace logged in that run), but `--all` can't be
 combined with an `Xh` duration, `--comment/-m`, or `-j/--jira`, since those
@@ -293,7 +319,7 @@ to delete the workspace and whether to move the linked Jira issue to
 skipped unless you confirm them. When you confirm the delete, the workspace
 is removed exactly like `et ws delete` — GNOME's workspace count is
 decremented to reclaim the slot and every non-`static` workspace after it is
-shifted one slot to the left (its Tracker timer follows it), so no gap is
+shifted one slot to the left (its counter follows it), so no gap is
 left in the middle of your workspaces. If only a single workspace remains
 (GNOME can't drop below one), its slot is reset to a bare `ET-<n>` instead.
 
@@ -392,8 +418,8 @@ against `/rest/api/3/myself` whenever a search comes back empty.
 > gsettings set org.gnome.desktop.wm.preferences num-workspaces <N>
 > ```
 
-> **Known limitation:** `et jira start` applies its changes (Tracker
-> timers, then config, then GNOME workspace names) sequentially without a
+> **Known limitation:** `et jira start` applies its changes (extension
+> counter, then config, then GNOME workspace names) sequentially without a
 > rollback. A failure partway through can leave the config and live GNOME
 > state temporarily out of sync; re-running the command reconciles them.
 
@@ -403,16 +429,28 @@ against `/rest/api/3/myself` whenever a search comes back empty.
 Common tasks are exposed through a [`Justfile`](./Justfile):
 
 ```bash
-just install-requirements   # uv sync + install pre-commit hooks
-just lint                   # ruff
-just static                 # mypy --strict
-just test                   # pytest + coverage
-just test-integ             # end-to-end integration tests
-just ops                    # build the distribution artifacts
+just install-requirements   # system tools + uv sync + hooks + GNOME extension
+just lint                   # ruff + ShellCheck
+just static                 # mypy + extension metadata/schema validation
+just test                   # pytest + coverage + deterministic GJS tests
+just test-integ             # Python integration + real headless Shell test
+just test-extension         # isolated interactive nested Shell
+just test-extension-live    # isolated automated real-Shell lifecycle test
+just package-extension      # build and validate only the extension ZIP
+just ops                    # build the Python package and extension ZIP
 ```
 
-`prek` (pre-commit) runs ruff, mypy, and pytest on every commit.
+`just ops` writes the extensions.gnome.org-ready archive to
+`dist/et@seb4stien.github.com.shell-extension.zip`. The package contains only
+the extension runtime, preferences, schema source, stylesheet, metadata, and
+license; generated schemas and repository tooling are excluded.
+
+`prek` (pre-commit) runs linting, static validation, Python tests, and the fast
+GJS unit tests on every commit. It does not launch a real GNOME Shell.
 
 ## License
 
-Licensed under the [Apache License 2.0](./LICENSE).
+The Python project is licensed under the [Apache License 2.0](./LICENSE).
+The GNOME Shell extension is licensed separately under
+[GPL-3.0-or-later](./gnome-extension/et@seb4stien.github.com/LICENSE), as
+required for GNOME Shell extensions.
