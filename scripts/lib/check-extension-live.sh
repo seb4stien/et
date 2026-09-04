@@ -12,6 +12,10 @@ set -uo pipefail
 : "${ET_ACTIVATION_TIMEOUT_SECONDS:?ET_ACTIVATION_TIMEOUT_SECONDS must be set}"
 : "${ET_TEST_ROOT:?ET_TEST_ROOT must be set}"
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/lib/enable-extension-setting.sh
+source "${REPO_ROOT}/scripts/lib/enable-extension-setting.sh"
+
 DEST="org.gnome.Shell"
 OBJECT_PATH="/org/gnome/Shell/Extensions/Et"
 IFACE="org.gnome.Shell.Extensions.Et"
@@ -32,17 +36,7 @@ save_diagnostics() {
 # (see scripts/lib/run-nested-test-shell.sh for the full rationale/quirks:
 # the `@as []` GVariant-annotated empty array form, and why nothing should
 # be printed for an empty list).
-mapfile -t current < <(gsettings get org.gnome.shell enabled-extensions \
-    | python3 -c '
-import ast, re, sys
-items = ast.literal_eval(re.sub(r"^@\S+\s+", "", sys.stdin.read()))
-print(chr(10).join(items)) if items else None
-')
-if [[ ! " ${current[*]} " == *" ${ET_EXTENSION_UUID} "* ]]; then
-    current+=("${ET_EXTENSION_UUID}")
-fi
-printf -v joined "'%s', " "${current[@]}"
-gsettings set org.gnome.shell enabled-extensions "[${joined%, }]"
+enable_gnome_extension_in_settings "${ET_EXTENSION_UUID}"
 
 gnome-shell --headless --wayland >"${SHELL_LOG}" 2>&1 &
 shell_pid=$!

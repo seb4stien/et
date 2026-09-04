@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -17,7 +20,7 @@ jobs:
           enable-cache: true
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
 
       - name: Set up Python
         run: uv python install 3.12
@@ -61,7 +64,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
 
       - name: Install GNOME Shell test dependencies
         run: scripts/install-gnome-test-requirements.sh

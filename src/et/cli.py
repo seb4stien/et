@@ -448,10 +448,8 @@ def _jira_key_option() -> str | None:
 
 @jira_app.command("start")
 def jira_start(
-    key: str | None = typer.Option(
+    key: str | None = typer.Argument(
         None,
-        "--key",
-        "-k",
         help=(
             "Jira issue key to start directly (e.g. ISD-123), instead of picking one "
             "from your active issues."
@@ -469,7 +467,7 @@ def jira_start(
     was run from is moved along to the new workspace, so it doesn't get
     left behind.
 
-    With `-k/--key KEY`, skips the picker and starts that specific issue
+    With KEY given, skips the picker and starts that specific issue
     directly (failing if it's already linked to a workspace). It follows
     the same steps as above, plus one more: if the issue isn't already in
     its project's current active sprint, offers to add it there too.
@@ -716,6 +714,20 @@ def jira_create(
     typer.echo(f"Created {_hyperlink(result.key, result.url)}")
 
 
+def _print_counter_reset_warning(result: LogTimeResult) -> None:
+    workspace = result.workspace_index + 1
+    typer.echo(
+        f"Warning: Jira accepted the worklog, but workspace {workspace}'s counter "
+        f"could not be reset: {result.counter_reset_error}. Do not log it again. "
+        "After the extension is available, reset only the counter with: "
+        "`gdbus call --session --dest org.gnome.Shell "
+        "--object-path /org/gnome/Shell/Extensions/Et "
+        "--method org.gnome.Shell.Extensions.Et.ResetWorkspaceCounter "
+        f"uint32 {result.workspace_index}`",
+        err=True,
+    )
+
+
 @jira_app.command("log-time")
 def jira_log_time(
     hours: str | None = typer.Argument(
@@ -794,6 +806,8 @@ def jira_log_time(
             )
             if logged.counter_reset:
                 typer.echo("Reset counter to 0")
+            elif logged.counter_reset_error is not None:
+                _print_counter_reset_warning(logged)
         for skipped in all_results.skipped:
             typer.echo(
                 f"Skipped workspace {skipped.workspace_index + 1} "
@@ -822,6 +836,8 @@ def jira_log_time(
     )
     if result.counter_reset:
         typer.echo("Reset counter to 0")
+    elif result.counter_reset_error is not None:
+        _print_counter_reset_warning(result)
 
 
 @jira_app.command("complete")
@@ -864,6 +880,9 @@ def jira_complete(
     except (ConfigError, WorkspaceError, JiraLogTimeError, TaskError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
+
+    if result.log_result.counter_reset_error is not None:
+        _print_counter_reset_warning(result.log_result)
 
     workspace_number = result.log_result.workspace_index + 1
     if result.workspace_freed:

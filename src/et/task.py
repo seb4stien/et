@@ -86,6 +86,20 @@ class TaskError(RuntimeError):
     """Raised when a task cannot be created or completed."""
 
 
+def _task_error_with_rollback(
+    error: Exception,
+    rollback_errors: list[str],
+    *,
+    extension_state_uncertain: bool = False,
+) -> TaskError:
+    if not rollback_errors and not extension_state_uncertain:
+        return TaskError(str(error))
+    details = list(rollback_errors)
+    if extension_state_uncertain:
+        details.append("the extension may have applied the D-Bus mutation before reporting failure")
+    return TaskError(f"{error}; operation may be partially applied: {'; '.join(details)}")
+
+
 @dataclass(frozen=True)
 class TaskCreateResult:
     """Summary of what `create_task_workspace` did."""
@@ -176,15 +190,53 @@ def create_task_workspace(
     )
 
     label = description if description is not None else name
+    original_names = [entry.name for entry in config.workspaces]
+    original_names.extend(
+        default_entry(index, "dynamic").name
+        for index in range(len(original_names), count)
+    )
+    count_changed = False
+    config_saved = False
+    names_changed = False
+    counter_prepared = False
     try:
         if grew:
             workspaces.set_workspace_count(count + 1)
-        et_extension.prepare_workspace(slot, label, estimate_seconds or 0)
+            count_changed = True
         save_config(replace(config, workspaces=workspaces_list))
+        config_saved = True
         workspaces.rename_all_workspaces([entry.name for entry in workspaces_list])
+        names_changed = True
+        et_extension.prepare_workspace(slot, label, estimate_seconds or 0)
+        counter_prepared = True
         workspaces.switch_to_workspace(slot)
     except (WorkspaceError, EtExtensionError, ConfigError) as exc:
-        raise TaskError(str(exc)) from exc
+        rollback_errors: list[str] = []
+        if counter_prepared:
+            try:
+                et_extension.remove_workspace(slot)
+            except EtExtensionError as rollback_error:
+                rollback_errors.append(f"counter cleanup failed: {rollback_error}")
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        if count_changed:
+            try:
+                workspaces.set_workspace_count(count)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-count restore failed: {rollback_error}")
+        raise _task_error_with_rollback(
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
 
     # Best-effort: moving the focused window across workspaces requires an
     # addressable X11 window, which native Wayland clients (e.g. many
@@ -309,16 +361,7 @@ def add_comment_to_current_workspace(body: str, *, issue_key: str | None = None)
 
 def persist_board_id(config: EtConfig, jira: JiraConfig, board_id: str) -> None:
     """Save `board_id` as `jira.board_id`, so later runs skip board discovery."""
-    updated_jira = JiraConfig(
-        base_url=jira.base_url,
-        email=jira.email,
-        pat=jira.pat,
-        jql=jira.jql,
-        priority_order=jira.priority_order,
-        project_key=jira.project_key,
-        board_id=board_id,
-    )
-    save_config(EtConfig(jira=updated_jira, workspaces=config.workspaces))
+    save_config(replace(config, jira=replace(jira, board_id=board_id)))
 
 
 def resolve_board_id(config: EtConfig, jira: JiraConfig, project_key: str) -> str | None:
@@ -368,7 +411,7 @@ def fetch_active_sprints_or_warn(
     is reported via `warn` and treated as "skip the sprint" (empty list)
     — this function owns all such warnings, so callers should not warn
     again on an empty return. Shared by `et jira create --sprint` and `et
-    jira start -k`.
+    jira start KEY`.
     """
     try:
         sprints = fetch_active_sprints(jira, board_id)
@@ -403,7 +446,7 @@ def _maybe_transition_to_in_progress(
     """Move `issue` to "In Progress" if it isn't already and `confirm_transition` agrees.
 
     Shared by `create_task_from_jira` (interactive picker) and
-    `create_task_from_jira_key` (`-k/--key`): both offer the same
+    `create_task_from_jira_key` (positional `KEY`): both offer the same
     "not already In Progress? move it there" step before creating the
     workspace.
     """
@@ -484,7 +527,7 @@ def ensure_issue_in_active_sprint(
 ) -> bool:
     """Add `issue_key` to one of its project's current active sprints, if needed.
 
-    Used by `create_task_from_jira_key` (`et jira start -k`). Degrades
+    Used by `create_task_from_jira_key` (`et jira start KEY`). Degrades
     gracefully rather than failing the whole command: if `jira.project_key`
     isn't set, no Agile board can be resolved/discovered for it, or no
     sprint is currently active, `warn(...)` is called and this returns
@@ -654,12 +697,32 @@ def _reset_workspace_slot(index: int) -> None:
     if index < len(workspaces_list):
         workspaces_list[index] = default_entry(index, workspaces_list[index].type)
 
+    original_names = [entry.name for entry in config.workspaces]
+    config_saved = False
+    names_changed = False
     try:
-        et_extension.remove_workspace(index)
         save_config(replace(config, workspaces=workspaces_list))
+        config_saved = True
         workspaces.rename_all_workspaces([entry.name for entry in workspaces_list])
+        names_changed = True
+        et_extension.remove_workspace(index)
     except (ConfigError, WorkspaceError, EtExtensionError) as exc:
-        raise TaskError(str(exc)) from exc
+        rollback_errors: list[str] = []
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        raise _task_error_with_rollback(
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
 
 
 def complete_task_for_current_workspace(
@@ -681,8 +744,11 @@ def complete_task_for_current_workspace(
     to the active workspace regardless, since it's not tied to which issue
     the time was logged against.
 
-    Then `confirm_delete(log_result)` is called: if it returns `True`, the
-    workspace is deleted the same way `et ws delete` does — GNOME's
+    Then `confirm_delete(log_result)` is called, unless Jira accepted the
+    worklog but the counter reset failed. In that partial-success case the
+    workspace is deliberately kept in place so the recovery command's slot
+    number remains safe. If deletion is confirmed, the workspace is deleted
+    the same way `et ws delete` does — GNOME's
     workspace count is decremented to reclaim the slot, every non-`static`
     slot after it (with its extension counter) shifts one slot to the left to
     close the gap, GNOME workspace names are renamed to match, and GNOME
@@ -705,7 +771,7 @@ def complete_task_for_current_workspace(
     on_logged(log_result)
 
     workspace_freed = False
-    if confirm_delete(log_result):
+    if log_result.counter_reset_error is None and confirm_delete(log_result):
         _free_workspace_slot(log_result.workspace_index)
         workspace_freed = True
 

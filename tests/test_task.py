@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -259,6 +259,35 @@ def test_create_task_workspace_wraps_config_error(
 
     with pytest.raises(TaskError, match="config boom"):
         create_task_workspace("my-task")
+
+
+@patch("et.task.workspaces.switch_to_workspace")
+@patch("et.task.et_extension.prepare_workspace", side_effect=EtExtensionError("prepare boom"))
+@patch("et.task.workspaces.rename_all_workspaces")
+@patch("et.task.save_config")
+@patch("et.task.workspaces.set_workspace_count")
+@patch("et.task.workspaces.get_workspace_count", return_value=1)
+@patch("et.task.load_config")
+def test_create_task_workspace_rolls_back_reversible_state_on_failure(
+    mock_load_config,
+    _mock_get_count,
+    mock_set_count,
+    mock_save_config,
+    mock_rename_all,
+    mock_prepare,
+    mock_switch,
+):
+    original_config = _config([WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A")])
+    mock_load_config.return_value = original_config
+
+    with pytest.raises(TaskError, match="operation may be partially applied"):
+        create_task_workspace("my-task", confirm_grow=lambda _count: True)
+
+    assert mock_set_count.call_args_list == [call(2), call(1)]
+    assert mock_save_config.call_args_list[-1] == call(original_config)
+    assert mock_rename_all.call_args_list == [call(["ISD-A", "my-task"]), call(["ISD-A"])]
+    mock_prepare.assert_called_once_with(1, "my-task", 0)
+    mock_switch.assert_not_called()
 
 
 # --- create_task_from_jira --------------------------------------------------
@@ -970,6 +999,27 @@ def test_complete_task_leaves_workspace_when_delete_declined(
     assert result.workspace_freed is False
     mock_save_config.assert_not_called()
     mock_rename_all.assert_not_called()
+
+
+@patch("et.task.delete_active_workspace")
+@patch("et.task.log_time_for_current_workspace")
+def test_complete_task_keeps_workspace_when_counter_reset_failed(
+    mock_log_time, mock_delete_workspace
+):
+    mock_log_time.return_value = LogTimeResult(
+        workspace_index=0,
+        issue_key="ISD-2",
+        seconds_logged=780,
+        counter_reset=False,
+        counter_reset_error="extension unavailable",
+    )
+    confirm_delete = MagicMock(return_value=True)
+
+    result = complete_task_for_current_workspace(confirm_delete=confirm_delete)
+
+    assert result.workspace_freed is False
+    confirm_delete.assert_not_called()
+    mock_delete_workspace.assert_not_called()
 
 
 @patch("et.task.transition_issue")

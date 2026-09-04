@@ -200,7 +200,7 @@ working exactly as before.
 ```bash
 et info                                      # (or bare `et`) show the active task's Jira issue and time spent
 et jira start                                # pick an active Jira issue and start a task from it
-et jira start -k ISD-123                     # start a task for a specific issue key directly
+et jira start ISD-123                        # start a task for a specific issue key directly
 et jira create                               # interactively create a new Jira issue
 et jira log-time                             # log the active workspace's tracked time to Jira
 et jira log-time 2h                          # log a manually-specified 2h duration instead
@@ -210,6 +210,11 @@ et jira status in-progress                   # move the linked issue to "In Prog
 et jira status                               # show current status, pick a new one from a numbered list
 et jira complete                             # log time, then optionally delete the workspace and close the issue
 ```
+
+If Jira accepts a worklog but the local extension counter cannot be reset,
+`et` reports the worklog as successful and prints a counter-only recovery
+command. Do not rerun `log-time` for that counter, since that would duplicate
+the Jira worklog.
 
 `et` with no subcommand shows the same Jira issue details as before, plus
 the elapsed time of the counter bound to the active
@@ -234,7 +239,7 @@ asks whether to
 move it there (showing its current status) and does so via Jira's
 transitions API if you confirm.
 
-`et jira start -k KEY` (or `--key KEY`) starts a task for a specific Jira
+`et jira start KEY` starts a task for a specific Jira
 issue directly instead of picking one from the active-issues list — it
 fails if `KEY` is already linked to an existing workspace. It follows the
 same steps as above (offering to move the issue to "In Progress" if

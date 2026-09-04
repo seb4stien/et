@@ -182,7 +182,7 @@ def test_log_time_propagates_workspace_errors(mock_load_config, mock_index):
 @patch("et.jira_time.et_extension.get_workspace_counter")
 @patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0)
 @patch("et.jira_time.load_config")
-def test_log_time_wraps_extension_errors_on_reset(
+def test_log_time_reports_partial_success_when_counter_reset_fails(
     mock_load_config,
     mock_index,
     mock_get_counter,
@@ -194,8 +194,11 @@ def test_log_time_wraps_extension_errors_on_reset(
     )
     mock_get_counter.return_value = WorkspaceCounter(elapsed_seconds=4320, running=True)
 
-    with pytest.raises(JiraLogTimeError, match="extension boom"):
-        log_time_for_current_workspace()
+    result = log_time_for_current_workspace()
+
+    assert result.counter_reset is False
+    assert result.counter_reset_error == "extension boom"
+    mock_create_worklog.assert_called_once()
 
 
 # --- log_manual_time_for_current_workspace --------------------------------
@@ -549,7 +552,7 @@ def test_log_all_does_not_reset_when_disabled(
 @patch("et.jira_time.create_worklog")
 @patch("et.jira_time.et_extension.get_workspace_counter")
 @patch("et.jira_time.load_config")
-def test_log_all_raises_when_reset_fails_after_successful_log(
+def test_log_all_reports_partial_success_when_reset_fails_after_successful_log(
     mock_load_config,
     mock_get_counter,
     mock_create_worklog,
@@ -562,5 +565,9 @@ def test_log_all_raises_when_reset_fails_after_successful_log(
     mock_get_counter.return_value = WorkspaceCounter(elapsed_seconds=3600, running=False)
     mock_fetch_issue.return_value = _issue("ISD-321")
 
-    with pytest.raises(JiraLogTimeError, match="reset boom"):
-        log_time_for_all_workspaces()
+    result = log_time_for_all_workspaces()
+
+    assert len(result.logged) == 1
+    assert result.logged[0].counter_reset is False
+    assert result.logged[0].counter_reset_error == "reset boom"
+    mock_create_worklog.assert_called_once()

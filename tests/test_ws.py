@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 
@@ -177,9 +177,9 @@ def test_delete_active_workspace_shifts_and_shrinks(
     mock_rename_all.assert_called_once_with(["ISD-A", "ISD-C"])
     mock_switch.assert_called_once_with(1)
 
-    # The freed slot's own counter is discarded up front, before the shift's
-    # move (2 -> 1) relocates the later counter into place.
-    mock_remove.assert_called_once_with(1)
+    # The atomic remap overwrites the freed slot and removes the final source,
+    # so a separate counter removal is unnecessary.
+    mock_remove.assert_not_called()
     mock_remap.assert_called_once_with([(2, 1)])
 
 
@@ -218,7 +218,7 @@ def test_delete_active_workspace_pads_implicit_slots(
     mock_set_count.assert_called_once_with(4)
     mock_rename_all.assert_called_once_with(["ISD-A", "ET-2", "ET-3", "ET-4"])
     mock_switch.assert_called_once_with(2)
-    mock_remove.assert_called_once_with(2)
+    mock_remove.assert_not_called()
     # Even though every shifted slot is a bare placeholder, the shift still
     # reports moves (there's nothing content-bearing to distinguish an
     # implicit slot from an explicit bare one), so the extension still gets
@@ -307,7 +307,7 @@ def test_delete_active_workspace_force_discards_linked_ref_and_counter(
     mock_rename_all.assert_called_once_with(["ISD-B"])
     mock_switch.assert_called_once_with(0)
 
-    mock_remove.assert_called_once_with(0)
+    mock_remove.assert_not_called()
     mock_remap.assert_called_once_with([(1, 0)])
 
 
@@ -430,16 +430,32 @@ def test_delete_active_workspace_propagates_config_error(_mock_load_config):
         delete_active_workspace()
 
 
-@patch("et.ws.et_extension.remove_workspace", side_effect=EtExtensionError("extension down"))
+@patch("et.ws.workspaces.set_workspace_count")
+@patch("et.ws.workspaces.rename_all_workspaces")
+@patch("et.ws.save_config")
+@patch("et.ws.et_extension.remap_workspaces", side_effect=EtExtensionError("extension down"))
 @patch("et.ws.workspaces.get_workspace_count", return_value=2)
 @patch("et.ws.workspaces.get_active_workspace_index", return_value=0)
 @patch("et.ws.load_config")
 def test_delete_active_workspace_wraps_extension_error(
-    mock_load_config, _mock_active_index, _mock_get_count, _mock_remove
+    mock_load_config,
+    _mock_active_index,
+    _mock_get_count,
+    _mock_remap,
+    mock_save,
+    mock_rename,
+    mock_set_count,
 ):
-    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ET-1")])
-    with pytest.raises(WsDeleteError, match="extension down"):
+    original_config = _config(
+        [WorkspaceConfigEntry(name="ET-1"), WorkspaceConfigEntry(name="ET-2")]
+    )
+    mock_load_config.return_value = original_config
+    with pytest.raises(WsDeleteError, match="operation may be partially applied"):
         delete_active_workspace()
+
+    assert mock_set_count.call_args_list == [call(1), call(2)]
+    assert mock_rename.call_args_list[-1] == call(["ET-1", "ET-2"])
+    assert mock_save.call_args_list[-1] == call(original_config)
 
 
 @patch("et.ws.workspaces.rename_all_workspaces", side_effect=WorkspaceError("rename boom"))
@@ -706,9 +722,17 @@ def test_apply_organize_plan_wraps_config_error(_mock_save_config, _mock_remap):
 @patch("et.ws.workspaces.rename_all_workspaces")
 @patch("et.ws.save_config")
 @patch("et.ws.et_extension.remap_workspaces", side_effect=EtExtensionError("extension down"))
-def test_apply_organize_plan_wraps_extension_error(_mock_remap, _mock_save_config, _mock_rename):
+def test_apply_organize_plan_wraps_extension_error(
+    _mock_remap, mock_save_config, mock_rename
+):
     config = _config([WorkspaceConfigEntry(name="ISD-A"), WorkspaceConfigEntry(name="ISD-B")])
     workspaces_list = list(config.workspaces)
     plan = build_organize_plan(workspaces_list, [0, 1], [1, 0])
-    with pytest.raises(WsOrganizeError, match="extension down"):
+    with pytest.raises(WsOrganizeError, match="operation may be partially applied"):
         apply_organize_plan(config, workspaces_list, plan)
+
+    assert mock_save_config.call_args_list[-1] == call(config)
+    assert mock_rename.call_args_list == [
+        call(["ISD-B", "ISD-A"]),
+        call(["ISD-A", "ISD-B"]),
+    ]

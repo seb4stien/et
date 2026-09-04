@@ -34,6 +34,23 @@ class WsOrganizeError(RuntimeError):
     """Raised when the dynamic workspaces cannot be reorganized."""
 
 
+def _error_with_rollback(
+    error_type: type[WsDeleteError] | type[WsOrganizeError],
+    error: Exception,
+    rollback_errors: list[str],
+    *,
+    extension_state_uncertain: bool = False,
+) -> WsDeleteError | WsOrganizeError:
+    if not rollback_errors and not extension_state_uncertain:
+        return error_type(str(error))
+    details = list(rollback_errors)
+    if extension_state_uncertain:
+        details.append("the extension may have applied the D-Bus mutation before reporting failure")
+    return error_type(
+        f"{error}; operation may be partially applied: {'; '.join(details)}"
+    )
+
+
 @dataclass(frozen=True)
 class WsDeleteResult:
     """Summary of what `delete_active_workspace` did."""
@@ -179,6 +196,7 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
         raise WsDeleteError("cannot delete the last remaining workspace")
 
     workspaces_list = _pad_workspaces_list(config.workspaces, max(count, index + 1))
+    original_names = [item.name for item in workspaces_list[:count]]
 
     entry = workspaces_list[index]
     if entry.type == "static":
@@ -205,25 +223,54 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
     saved_list = list(workspaces_list)
     _trim_trailing_default_entries(saved_list)
 
+    config_saved = False
+    names_changed = False
+    count_changed = False
     try:
-        # Discard the deleted workspace's own counter up front (it must run
-        # before the remap below, since the remap's first move may target
-        # this same freed index). The shift's moves only relocate later
-        # counters into place, so without this the freed slot's stale
-        # counter would otherwise survive untouched when there's nothing to
-        # shift into it (e.g. deleting the last non-static workspace).
-        et_extension.remove_workspace(index)
-        if moves:
-            et_extension.remap_workspaces(moves)
+        save_config(replace(config, workspaces=saved_list))
+        config_saved = True
+        workspaces.rename_all_workspaces(rename_names)
+        names_changed = True
         if shrink:
             workspaces.set_workspace_count(new_count)
-        save_config(replace(config, workspaces=saved_list))
-        # Rename after any shrink so the workspace-names array matches the
-        # (possibly reduced) set of live GNOME workspaces.
-        workspaces.rename_all_workspaces(rename_names)
-        workspaces.switch_to_workspace(min(index, new_count - 1))
+            count_changed = True
+        # Remapping is simultaneous: when moves exist, the deleted slot is
+        # overwritten by the first source and the final source is removed.
+        # A standalone remove is only needed when there is nothing to shift.
+        if moves:
+            et_extension.remap_workspaces(moves)
+        else:
+            et_extension.remove_workspace(index)
     except (ConfigError, WorkspaceError, EtExtensionError) as exc:
-        raise WsDeleteError(str(exc)) from exc
+        rollback_errors: list[str] = []
+        if count_changed:
+            try:
+                workspaces.set_workspace_count(count)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-count restore failed: {rollback_error}")
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        raise _error_with_rollback(
+            WsDeleteError,
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
+
+    try:
+        workspaces.switch_to_workspace(min(index, new_count - 1))
+    except WorkspaceError as exc:
+        raise WsDeleteError(
+            f"workspace was deleted, but switching to the surviving workspace failed: {exc}"
+        ) from exc
 
     return WsDeleteResult(workspace_index=index, remaining_workspaces=new_count)
 
@@ -383,13 +430,34 @@ def apply_organize_plan(
 
     rename_names = [item.name for item in new_workspaces_list]
 
+    original_names = [item.name for item in workspaces_list]
+    config_saved = False
+    names_changed = False
     try:
+        save_config(replace(config, workspaces=saved_list))
+        config_saved = True
+        workspaces.rename_all_workspaces(rename_names)
+        names_changed = True
         if moves:
             et_extension.remap_workspaces(moves)
-        save_config(replace(config, workspaces=saved_list))
-        workspaces.rename_all_workspaces(rename_names)
     except (ConfigError, WorkspaceError, EtExtensionError) as exc:
-        raise WsOrganizeError(str(exc)) from exc
+        rollback_errors: list[str] = []
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        raise _error_with_rollback(
+            WsOrganizeError,
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
 
 
 def open_in_editor(content: str) -> str:

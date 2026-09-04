@@ -601,7 +601,7 @@ def test_jira_start_with_key_creates_task_directly(mock_create_from_jira_key):
         workspace_index=2, name="ISD-2", ref="jira:ISD-2", window_moved=True
     )
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"])
+    result = runner.invoke(app, ["jira", "start", "ISD-2"])
 
     assert result.exit_code == 0
     assert "Created workspace 3: 'ISD-2' (linked to ISD-2)" in result.stdout
@@ -613,7 +613,7 @@ def test_jira_start_with_key_creates_task_directly(mock_create_from_jira_key):
 def test_jira_start_with_key_reports_error(mock_create_from_jira_key):
     mock_create_from_jira_key.side_effect = TaskError("ISD-2 is already linked to workspace 1")
 
-    result = runner.invoke(app, ["jira", "start", "--key", "ISD-2"])
+    result = runner.invoke(app, ["jira", "start", "ISD-2"])
 
     assert result.exit_code == 1
     assert "Error: ISD-2 is already linked to workspace 1" in result.output
@@ -640,7 +640,7 @@ def test_jira_start_with_key_prompts_to_move_issue_to_in_progress_when_confirmed
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="y\n")
+    result = runner.invoke(app, ["jira", "start", "ISD-2"], input="y\n")
 
     assert result.exit_code == 0
     assert "ISD-2 is currently 'To Do'. Move it to 'In Progress'?" in result.stdout
@@ -665,7 +665,7 @@ def test_jira_start_with_key_prompts_to_add_to_sprint(mock_create_from_jira_key)
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="y\n")
+    result = runner.invoke(app, ["jira", "start", "ISD-2"], input="y\n")
 
     assert result.exit_code == 0
     assert "ISD-2 isn't in the current sprint 'Sprint 7'. Add it?" in result.stdout
@@ -694,7 +694,7 @@ def test_jira_start_with_key_prompts_to_choose_among_multiple_active_sprints(
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="2\n")
+    result = runner.invoke(app, ["jira", "start", "ISD-2"], input="2\n")
 
     assert result.exit_code == 0
     assert "ISD-2 isn't in any of the project's active sprints:" in result.stdout
@@ -718,7 +718,7 @@ def test_jira_start_with_key_prints_warnings(mock_create_from_jira_key):
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"])
+    result = runner.invoke(app, ["jira", "start", "ISD-2"])
 
     assert result.exit_code == 0
     assert "Warning: no active sprint found" in result.output
@@ -743,6 +743,29 @@ def test_jira_log_time_logs_and_reports_duration(mock_log_time, mock_load_config
         result.stdout
     )
     mock_log_time.assert_called_once_with(description="note", reset=True, issue_key=None)
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.log_time_for_current_workspace")
+def test_jira_log_time_warns_when_worklog_succeeds_but_reset_fails(
+    mock_log_time, mock_load_config
+):
+    mock_log_time.return_value = LogTimeResult(
+        workspace_index=1,
+        issue_key="ISD-321",
+        seconds_logged=4320,
+        counter_reset=False,
+        counter_reset_error="extension unavailable",
+    )
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "log-time"])
+
+    assert result.exit_code == 0
+    assert "Jira accepted the worklog" in result.output
+    assert "Do not log it again" in result.output
+    assert "ResetWorkspaceCounter uint32 1" in result.output
 
 
 @patch("et.cli.load_config")
@@ -841,6 +864,33 @@ def test_jira_log_time_all_reports_logged_and_skipped_workspaces(
         "Skipped workspace 3 (<https://example.atlassian.net/browse/ISD-654|jira:ISD-654>): "
         "only 10s elapsed (minimum 60s)" in result.stdout
     )
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.log_time_for_all_workspaces")
+def test_jira_log_time_all_warns_for_each_failed_counter_reset(
+    mock_log_all, mock_load_config
+):
+    mock_log_all.return_value = AllLogTimeResult(
+        logged=[
+            LogTimeResult(
+                workspace_index=2,
+                issue_key="ISD-654",
+                seconds_logged=3600,
+                counter_reset=False,
+                counter_reset_error="extension unavailable",
+            )
+        ],
+        skipped=[],
+    )
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "log-time", "--all"])
+
+    assert result.exit_code == 0
+    assert "Jira accepted the worklog" in result.output
+    assert "ResetWorkspaceCounter uint32 2" in result.output
 
 
 @patch("et.cli.load_config")
@@ -969,6 +1019,34 @@ def test_jira_complete_reports_error(mock_complete):
 
     assert result.exit_code == 1
     assert "Error: no Jira issue linked to workspace 1" in result.output
+
+
+@patch("et.cli.complete_task_for_current_workspace")
+def test_jira_complete_warns_after_workspace_is_kept_for_failed_counter_reset(mock_complete):
+    log_result = LogTimeResult(
+        workspace_index=1,
+        issue_key="ISD-321",
+        seconds_logged=780,
+        counter_reset=False,
+        counter_reset_error="extension unavailable",
+    )
+
+    def fake_complete(comment, issue_key, on_logged, confirm_delete, confirm_done):
+        on_logged(log_result)
+        return TaskCompleteResult(
+            log_result=log_result,
+            workspace_freed=False,
+            moved_to_done=False,
+        )
+
+    mock_complete.side_effect = fake_complete
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "complete"])
+
+    assert result.exit_code == 0
+    assert "Jira accepted the worklog" in result.output
+    assert "ResetWorkspaceCounter uint32 1" in result.output
 
 
 @patch("et.cli.load_config")

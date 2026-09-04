@@ -11,6 +11,10 @@ set -euo pipefail
 : "${ET_EXTENSION_UUID:?ET_EXTENSION_UUID must be set}"
 : "${ET_TEST_ROOT:?ET_TEST_ROOT must be set}"
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/lib/enable-extension-setting.sh
+source "${REPO_ROOT}/scripts/lib/enable-extension-setting.sh"
+
 echo "  - Disposable test root: ${ET_TEST_ROOT}"
 
 # Pre-seed enabled-extensions in the (empty, private) dconf database
@@ -25,17 +29,7 @@ echo "  - Disposable test root: ${ET_TEST_ROOT}"
 # `@<type> ` annotation before parsing so an empty enabled-extensions list
 # doesn't crash this. Also print nothing (not an empty line) when the list
 # is empty, so `mapfile` doesn't capture a stray blank element.
-mapfile -t current < <(gsettings get org.gnome.shell enabled-extensions \
-    | python3 -c '
-import ast, re, sys
-items = ast.literal_eval(re.sub(r"^@\S+\s+", "", sys.stdin.read()))
-print(chr(10).join(items)) if items else None
-')
-if [[ ! " ${current[*]} " == *" ${ET_EXTENSION_UUID} "* ]]; then
-    current+=("${ET_EXTENSION_UUID}")
-fi
-printf -v joined "'%s', " "${current[@]}"
-gsettings set org.gnome.shell enabled-extensions "[${joined%, }]"
+enable_gnome_extension_in_settings "${ET_EXTENSION_UUID}"
 
 gnome-shell --nested --wayland &
 nested_shell_pid=$!

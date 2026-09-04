@@ -66,11 +66,6 @@ def write_string_array(schema: str, key: str, values: list[str]) -> None:
     _set_raw(schema, key, repr(values))
 
 
-def set_boolean(schema: str, key: str, value: bool) -> None:
-    """Write a boolean value to `schema`'s `key`."""
-    _set_raw(schema, key, "true" if value else "false")
-
-
 def set_int(schema: str, key: str, value: int) -> None:
     """Write an integer value to `schema`'s `key`."""
     _set_raw(schema, key, str(value))

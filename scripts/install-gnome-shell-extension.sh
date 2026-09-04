@@ -27,6 +27,9 @@ SOURCE_DIR="${REPO_ROOT}/gnome-extension/${UUID}"
 EXTENSIONS_DIR="${HOME}/.local/share/gnome-shell/extensions"
 TARGET_DIR="${EXTENSIONS_DIR}/${UUID}"
 
+# shellcheck source=scripts/lib/enable-extension-setting.sh
+source "${REPO_ROOT}/scripts/lib/enable-extension-setting.sh"
+
 MODE="copy"
 for arg in "$@"; do
     case "${arg}" in
@@ -103,22 +106,7 @@ if enable_err=$(gnome-extensions enable "${UUID}" 2>&1 >/dev/null); then
     echo "enabled ${UUID}"
     echo "note: if GNOME Shell was already running, log out/in (or Alt+F2, r on X11) for it to load."
 else
-    # `gsettings get` on an empty array prints the GVariant-annotated form
-    # `@as []` (needed since an empty array's element type can't otherwise
-    # be inferred from its contents) instead of plain `[]`; strip that
-    # leading `@<type> ` annotation before parsing so an empty
-    # enabled-extensions list doesn't crash this. Also print nothing (not
-    # an empty line) when the list is empty, so `mapfile` doesn't capture a
-    # stray blank element.
-    mapfile -t current < <(gsettings get org.gnome.shell enabled-extensions \
-        | python3 -c "import ast, re, sys
-items = ast.literal_eval(re.sub(r'^@\S+\s+', '', sys.stdin.read()))
-print('\n'.join(items)) if items else None")
-    if [[ ! " ${current[*]} " == *" ${UUID} "* ]]; then
-        current+=("${UUID}")
-    fi
-    printf -v joined "'%s', " "${current[@]}"
-    gsettings set org.gnome.shell enabled-extensions "[${joined%, }]"
+    enable_gnome_extension_in_settings "${UUID}"
     echo "registered ${UUID} as enabled (GNOME Shell hasn't scanned it in yet: ${enable_err})"
 
     # Query the *running* Shell over D-Bus to tell apart "Shell has never

@@ -5,7 +5,23 @@ All notable changes to `et` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** `et jira start` now takes the Jira issue key as a
+  positional argument (`et jira start KEY`) instead of the `-k`/`--key`
+  option; the option has been removed.
+
 ### Fixed
+- Workspace creation, deletion, reset, and reordering now roll back reversible
+  config and GNOME settings changes when a later step fails, and report when
+  extension state may still be partially applied.
+- Jira worklogs that succeed before a counter-reset failure are now reported
+  as partial successes with a safe counter-only recovery command, preventing
+  accidental duplicate worklogs on retry.
+- Jira issue and transition parsing now handles malformed nested response
+  fields without leaking raw `AttributeError` exceptions.
+- Config updates are now written atomically with restrictive permissions.
+- CI now restricts token permissions and pins the third-party `setup-just`
+  action to an immutable commit.
 - `scripts/install-gnome-shell-extension.sh` now *copies* the `et` GNOME
   Shell extension into `~/.local/share/gnome-shell/extensions/` by default
   instead of symlinking it, so it keeps working across workspace

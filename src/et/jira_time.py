@@ -51,6 +51,7 @@ class LogTimeResult:
     seconds_logged: int
     counter_reset: bool
     summary: str = ""
+    counter_reset_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,7 +152,10 @@ def log_time_for_current_workspace(
 
     On success, resets the counter to 0 (unless `reset=False`) so the same
     elapsed time isn't accidentally logged again later. The reset only
-    happens after the Jira worklog call has actually succeeded.
+    happens after the Jira worklog call has actually succeeded. If Jira
+    accepts the worklog but the reset fails, returns a partial-success
+    result with `counter_reset_error` populated so callers can warn against
+    retrying the already-committed worklog.
     """
     config: EtConfig = load_config()
     jira_config, index, resolved_key = resolve_active_issue(config, issue_key=issue_key)
@@ -173,17 +177,19 @@ def log_time_for_current_workspace(
     except JiraError as exc:
         raise JiraLogTimeError(str(exc)) from exc
 
+    counter_reset_error: str | None = None
     if reset:
         try:
             et_extension.reset_workspace_counter(index)
         except EtExtensionError as exc:
-            raise JiraLogTimeError(str(exc)) from exc
+            counter_reset_error = str(exc)
 
     return LogTimeResult(
         workspace_index=index,
         issue_key=resolved_key,
         seconds_logged=seconds,
-        counter_reset=reset,
+        counter_reset=reset and counter_reset_error is None,
+        counter_reset_error=counter_reset_error,
     )
 
 
@@ -245,9 +251,10 @@ def log_time_for_all_workspaces(
     resets a workspace whose Jira call actually failed.
 
     Raises `ConfigError` if the config file is missing/malformed, and
-    `JiraLogTimeError` only when there's no 'jira' config block at all, or
-    a counter reset itself fails after a successful Jira call (every other
-    failure becomes a per-workspace skip instead).
+    `JiraLogTimeError` only when there's no 'jira' config block at all.
+    Every per-workspace failure becomes either a skip or, when Jira accepted
+    the worklog but the counter reset failed, a partial-success
+    `LogTimeResult` with `counter_reset_error` populated.
     """
     config: EtConfig = load_config()
     if config.jira is None:
@@ -304,19 +311,21 @@ def log_time_for_all_workspaces(
         except JiraError:
             summary = ""
 
+        counter_reset_error: str | None = None
         if reset:
             try:
                 et_extension.reset_workspace_counter(index)
             except EtExtensionError as exc:
-                raise JiraLogTimeError(str(exc)) from exc
+                counter_reset_error = str(exc)
 
         logged.append(
             LogTimeResult(
                 workspace_index=index,
                 issue_key=issue_key,
                 seconds_logged=seconds,
-                counter_reset=reset,
+                counter_reset=reset and counter_reset_error is None,
                 summary=summary,
+                counter_reset_error=counter_reset_error,
             )
         )
 

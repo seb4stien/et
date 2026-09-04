@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).parents[1]
 EXTENSION_DIR = REPO_ROOT / "gnome-extension" / "et@seb4stien.github.com"
 VALIDATOR = REPO_ROOT / "scripts" / "check-gnome-shell-extension.py"
 ISOLATED_ENV = REPO_ROOT / "scripts" / "lib" / "with-isolated-gnome-shell-env.sh"
+ENABLE_EXTENSION_SETTING = REPO_ROOT / "scripts" / "lib" / "enable-extension-setting.sh"
 
 
 def test_validator_accepts_source_and_complete_archive(tmp_path: Path) -> None:
@@ -86,3 +87,37 @@ def test_isolated_environment_stages_extension_without_using_host_home(tmp_path:
     staged_root = Path(json.loads(output.read_text())["root"])
     assert staged_root.parent == temporary_parent
     assert not staged_root.exists()
+
+
+def test_enable_extension_setting_handles_typed_empty_array(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "calls"
+    fake_gsettings = fake_bin / "gsettings"
+    fake_gsettings.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$1\" = get ]; then\n"
+        "    echo '@as []'\n"
+        "else\n"
+        "    printf '%s\\n' \"$*\" >\"${CALLS_FILE}\"\n"
+        "fi\n"
+    )
+    fake_gsettings.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"source {ENABLE_EXTENSION_SETTING}; "
+            "enable_gnome_extension_in_settings et@example.com",
+        ],
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "CALLS_FILE": str(calls)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().strip() == (
+        "set org.gnome.shell enabled-extensions ['et@example.com']"
+    )

@@ -13,6 +13,7 @@ from et.jira import (
     JiraError,
     JiraIssue,
     JiraSprint,
+    JiraTransition,
     add_issue_to_sprint,
     create_comment,
     create_issue,
@@ -132,6 +133,22 @@ def test_fetch_active_issues_skips_issue_without_key(mock_get, caplog):
 
     assert [issue.key for issue in issues] == ["PROJ-2"]
     assert "missing or invalid 'key'" in caplog.text
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_issues_skips_issue_with_invalid_fields(mock_get, caplog):
+    mock_get.return_value = _response(
+        [
+            {"key": "PROJ-1", "fields": []},
+            _issue("PROJ-2", "Has valid fields", "Low"),
+        ]
+    )
+
+    with caplog.at_level("WARNING", logger="et.jira"):
+        issues = fetch_active_issues(_config())
+
+    assert [issue.key for issue in issues] == ["PROJ-2"]
+    assert "invalid 'fields'" in caplog.text
 
 
 @patch("et.jira.requests.get")
@@ -385,6 +402,18 @@ def test_fetch_transitions_skips_transitions_without_id(mock_get):
     transitions = fetch_transitions(_config(), "PROJ-1")
 
     assert transitions == []
+
+
+@patch("et.jira.requests.get")
+def test_fetch_transitions_tolerates_invalid_nested_fields(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        {"transitions": [{"id": "31", "name": ["invalid"], "to": ["invalid"]}]},
+    )
+
+    transitions = fetch_transitions(_config(), "PROJ-1")
+
+    assert transitions == [JiraTransition(id="31", name="", to_status="")]
 
 
 @patch("et.jira.requests.get")
