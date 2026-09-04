@@ -1,6 +1,6 @@
 [project]
 name = "et"
-version = "0.1.0"
+version = "1.0.0rc1"
 description = "et: a small CLI to track effort and manage your Ubuntu/GNOME workspace."
 readme = "README.md"
 license = "Apache-2.0"

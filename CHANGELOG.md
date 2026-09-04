@@ -5,6 +5,10 @@ All notable changes to `et` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.0.0-rc.1]
+
+Release candidate for `v1.0.0`, built from `feat/native-wayland` (PR #9).
+
 ### Changed
 - **Breaking:** `et jira start` now takes the Jira issue key as a
   positional argument (`et jira start KEY`) instead of the `-k`/`--key`
