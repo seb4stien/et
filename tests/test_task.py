@@ -237,10 +237,11 @@ def test_create_task_workspace_wraps_workspace_error(mock_load_config, _mock_get
     "et.task.et_extension.prepare_workspace",
     side_effect=EtExtensionError("extension boom"),
 )
+@patch("et.task.save_config")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
 def test_create_task_workspace_wraps_extension_error(
-    mock_load_config, _mock_get_count, _mock_prepare_workspace
+    mock_load_config, _mock_get_count, _mock_save_config, _mock_prepare_workspace
 ):
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ET-1")])
 
@@ -950,11 +951,12 @@ def test_complete_task_wraps_workspace_error_after_logging(
     "et.task.et_extension.remove_workspace",
     side_effect=EtExtensionError("extension down"),
 )
+@patch("et.task.save_config")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
 @patch("et.task.log_time_for_current_workspace")
 def test_complete_task_wraps_extension_error_freeing_slot(
-    mock_log_time, mock_load_config, _mock_count, _mock_remove
+    mock_log_time, mock_load_config, _mock_count, _mock_save_config, _mock_remove
 ):
     mock_log_time.return_value = LogTimeResult(
         workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
