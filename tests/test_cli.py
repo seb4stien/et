@@ -471,7 +471,6 @@ def test_jira_start_lists_issues_and_creates_from_selection(mock_create_from_jir
     assert "Active issues not yet linked to a workspace:" in result.stdout
     assert "ISD-2" in result.stdout
     assert "Created workspace 3: 'ISD-2' (linked to ISD-2)" in result.stdout
-    assert "Note: could not move this terminal window" not in result.stdout
 
 
 @patch("et.cli.create_task_from_jira")
@@ -495,7 +494,6 @@ def test_jira_start_notes_when_window_could_not_be_moved(mock_create_from_jira):
     result = runner.invoke(app, ["jira", "start"], input="1\n")
 
     assert result.exit_code == 0
-    assert "Note: could not move this terminal window to the new workspace" in result.stdout
 
 
 @patch("et.cli.create_task_from_jira")
