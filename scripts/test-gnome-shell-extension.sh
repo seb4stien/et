@@ -66,7 +66,7 @@ echo "  - Exit this shell (Ctrl+D / 'exit') to stop the nested Shell and" \
 echo
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/et-gnome-shell-test-XXXXXX")"
-# shellcheck disable=SC2317 # Invoked by the EXIT trap.
+# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
 cleanup() {
     "${REPO_ROOT}/scripts/lib/remove-isolated-gnome-shell-env.sh" "${test_root}"
 }
