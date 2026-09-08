@@ -206,7 +206,7 @@ wheels = [
 
 [[package]]
 name = "et"
-version = "1.0.0rc1"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
