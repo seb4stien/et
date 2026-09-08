@@ -7,37 +7,93 @@ can link workspaces to Jira issues to log time against them.
 
 ## Features
 
-- **`et`** (no subcommand) / **`et info`** — in a non-`static` workspace,
-  shows the Jira issue linked to it plus its tracked time; otherwise shows
-  this help.
-- **`et ws rename`** — rename the active workspace (or all of them from config).
-- **`et ws delete`** — delete the active (free) workspace, shifting later ones left.
-- **`et jira [start|create|log-time|complete|comment|status]`** — a friendlier,
-  task-centric layer that creates a workspace + automatic counter for a task
-  (picked straight from your active Jira issues, optionally moving it to "In
-  Progress"), interactively creates new Jira issues (optionally pre-filled
-  from a GitHub issue/PR URL), completes a task by logging its tracked time
-  to Jira and optionally freeing the slot and moving the issue to "Done",
-  adds a comment to the linked issue, and moves the linked issue through its
-  workflow (directly to "In Progress"/"Blocked", or interactively picked from
-  a numbered list of the team's workflow statuses).
+- **`et jira [start|create|log-time|complete|comment|status]`**: interact and align your workspaces with Jira from the command line:
+  - `create`: wrapper to create Jira issue from the command line (can take GitHub PR as input)
+  - `start`: let you select and assigned task, create a workspace associated to it, and track the time you spend on it.
+  - `log-time`: log your current progress (typically to do it on a daily-basis)
+  - `complete`: log the time spent, and move the issue to Done.
+  - `comment`: add a comment to the ticket.
+  - `status`: show and let you update the status.
+- **`et`** (no subcommand) / **`et info`**: show the Jira issue linked to the workspace (if any).
 - **`et git create-branch`** (alias **`et git cb`**) — create (and switch
   to) a git branch named after the current task's Jira issue, following
   Canonical's `type/scope-short-description-jirakey` branch naming
   convention.
+- **`et ws rename`** — rename the active workspace (or all of them from config).
+- **`et ws delete`** — delete the active (free) workspace, shifting later ones left.
+
+## Getting started
+
+New to `et`? Here's the fastest path to a working setup on Ubuntu 24.04+
+(adapt package names if you're on a different distribution):
+
+1. **Install the system packages `et` needs:**
+
+   ```bash
+   sudo apt update
+   sudo apt install libglib2.0-bin gnome-shell
+   ```
+
+   - `libglib2.0-bin` provides `gsettings`/`gdbus` (workspace renaming and
+     talking to the GNOME Shell extension).
+   - `gnome-shell` provides `gnome-extensions` (install/enable the
+     extension) — already present on any GNOME desktop.
+   - Optionally, [`gh`](https://cli.github.com/) (`sudo apt install gh`,
+     then `gh auth login`) if you want `et jira create <GITHUB_URL>` to
+     pre-fill from a GitHub issue/PR.
+
+   Python **3.12+** is required — Ubuntu 24.04+ ships it by default
+   (`python3 --version` to check).
+2. **Install [uv](https://docs.astral.sh/uv/):**
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+3. **Clone the repo and install the GNOME Shell extension:**
+
+   ```bash
+   git clone <this-repo-url> && cd et
+   scripts/install-gnome-shell-extension.sh
+   ```
+4. **Log out and back in** so GNOME Shell picks up the newly installed
+   extension.
+5. **Create your config file interactively:**
+
+   ```bash
+   uv run et config
+   ```
+
+   Walks you through the `jira` block and your `workspaces` list — see
+   [Configuration](#configuration) for the file format it writes.
+6. **Try it out:**
+
+   ```bash
+   uv run et --help
+   uv run et ws rename focus
+   uv run et jira start
+   ```
+7. **Install globally**, so you can run `et` directly instead of
+   `uv run et`:
+
+   ```bash
+   uv tool install .
+   ```
+
+Want to contribute code instead? See [CONTRIBUTING.md](./CONTRIBUTING.md)
+for the development workflow (`just install-requirements` additionally
+pulls in dev/test tooling — `just` itself, plus GJS/ShellCheck/`prek` — on
+top of everything above), and [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+for how `et` and its GNOME Shell extension are designed internally.
 
 ## Requirements
 
-`et` shells out to standard GNOME/Ubuntu tooling, which must be available on
-`PATH`:
+`et` shells out to standard GNOME/Ubuntu tooling, which must be available
+on `PATH`:
 
 - [`gsettings`](https://manpages.ubuntu.com/manpages/en/man1/gsettings.1.html)
   — read/write GNOME workspace names and settings.
 - [`gdbus`](https://manpages.ubuntu.com/manpages/en/man1/gdbus.1.html)
   — communicate with the `et` GNOME Shell extension.
-- [`wmctrl`](https://manpages.ubuntu.com/manpages/en/man1/wmctrl.1.html)
-  — detect the active workspace on **X11** sessions (`sudo apt install
-  wmctrl`). Not needed on Wayland — see below.
 - [`gnome-extensions`](https://manpages.ubuntu.com/manpages/en/man1/gnome-extensions.1.html)
   — install, enable, and configure the bundled extension.
 - The bundled **et Workspace Timer** GNOME Shell extension
@@ -46,31 +102,21 @@ can link workspaces to Jira issues to log time against them.
 - [`gh`](https://cli.github.com/) — installed and authenticated, only
   needed for `et jira create <GITHUB_URL>`'s summary/description prefill.
 
-Python **3.12+** is required.
+Python **3.12+** is required. [`just`](https://github.com/casey/just) is
+only needed for the `Justfile`-based development workflow — see
+[CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ### The `et` GNOME Shell extension
 
-`wmctrl` relies on the X11 window-manager protocol, so it can't detect the
-active workspace on a Wayland session (the default since Ubuntu 26.04).
-Since GNOME Shell doesn't expose the active workspace over D-Bus by default,
-this repo ships a companion extension,
+Since GNOME Shell doesn't expose the active workspace over D-Bus by
+default, this repo ships a companion extension,
 [`gnome-extension/et@seb4stien.github.com`](gnome-extension/et@seb4stien.github.com),
-that exposes Shell state through D-Bus. It also owns the per-workspace counters:
-when an `et`-managed `dynamic` workspace is active, its counter runs
-automatically; switching away or locking the session pauses it, and returning
-or unlocking resumes it. Ordinary keyboard/mouse inactivity still counts.
-
-The extension is ticket-system agnostic. The CLI can give it a workspace label
-and reference estimate (for Jira workspaces these are the issue summary and
-original estimate), but the extension treats them as generic display values.
-Its preferences independently control whether the label, estimate, and current
-counter appear, and whether the display is shown in the top panel and GNOME
-workspace switcher. The default is to show the label, original estimate, and
-counter on both surfaces.
-Whenever the top panel display is enabled, a small icon is always shown there
-as a persistent indicator that the extension is installed and active, even
-before any workspace has been prepared; the label/estimate/counter text is
-appended alongside it once a workspace has one.
+that reports it directly. It also owns the per-workspace counters: when an
+`et`-managed `dynamic` workspace is active, its counter runs automatically;
+switching away or locking the session pauses it, and returning or
+unlocking resumes it. Ordinary keyboard/mouse inactivity still counts. See
+[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for how the extension and
+its display preferences work internally.
 
 Install and enable it with:
 
@@ -81,15 +127,10 @@ scripts/install-gnome-shell-extension.sh
 (this also runs automatically as part of `just install-requirements`). By
 default this *copies* the extension into
 `~/.local/share/gnome-shell/extensions/et@seb4stien.github.com` rather than
-symlinking it, so the installed copy keeps working even if this checkout is
-later re-provisioned (e.g. a fresh clone into a re-created workspace) on a
-timeline independent of your GNOME session — GNOME Shell only scans the
-extensions directory once at startup, and a symlink whose target doesn't
-exist yet at that exact moment gets silently skipped and never picked up
-until a full restart happens *after* the target exists. If you're actively
-editing `extension.js`, pass `--dev` (or `--symlink`) to symlink instead so
-you don't need to re-run the script after every change (a Shell restart is
-still required to pick up new code either way).
+symlinking it (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for why).
+If you're actively editing `extension.js`, pass `--dev` (or `--symlink`) to
+symlink instead so you don't need to re-run the script after every change
+(a Shell restart is still required to pick up new code either way).
 
 `gnome-extensions enable` may report the extension "does not exist" the
 first time it's installed — this is expected, since GNOME Shell only scans
@@ -97,45 +138,14 @@ first time it's installed — this is expected, since GNOME Shell only scans
 detects this, registers it as enabled directly via `gsettings`, and checks
 the running Shell over D-Bus to tell you whether it has no record of the
 extension yet (needs a full restart) or already scanned it but hit an
-error. Either way, log out and back in afterwards (or `Alt+F2`, `r` on X11)
-so GNOME Shell picks it up.
+error. Either way, log out and back in afterwards so GNOME Shell picks it
+up.
 
 Open its preferences with:
 
 ```bash
 gnome-extensions prefs et@seb4stien.github.com
 ```
-
-### Testing the extension
-
-The extension has three test layers:
-
-- `just test` runs the Python suite and deterministic GJS unit tests for the
-  extension's persisted counter store and display formatting. These tests do
-  not start GNOME Shell or access the host's GNOME settings.
-- `just test-extension-live` starts a real headless GNOME Shell and exercises
-  the complete D-Bus lifecycle, including timing, remapping, persistence, and
-  disable/re-enable cleanup. It uses a disposable HOME and XDG tree.
-- `just test-extension` starts an interactive nested Wayland Shell for visual
-  checks. The extension, dconf database, caches, runtime directory, and enabled
-  extension list all live under a temporary directory that is deleted on exit;
-  nothing is installed into the host user's extension directory. A working
-  user systemd session is required so every helper daemon is reaped.
-
-GitHub Actions runs the real-Shell lifecycle test on Ubuntu 24.04/GNOME 46 and
-Ubuntu 26.04/GNOME 50, matching `metadata.json`.
-
-For full-desktop visual compatibility checks, use disposable GNOME Boxes or
-QEMU snapshots for both Ubuntu releases:
-
-1. Build the test artifact with `just package-extension`.
-2. Restore a clean VM snapshot and copy
-   `dist/et@seb4stien.github.com.shell-extension.zip` into the VM.
-3. Install the ZIP with `gnome-extensions install --force <zip>`, log out and
-   back in, then enable the extension.
-4. Check preferences, the top-panel display, workspace-switcher labels,
-   workspace changes, lock/unlock counter pausing, and disable/re-enable.
-5. Revert the VM snapshot after the test.
 
 ## Installation
 
@@ -228,14 +238,12 @@ taken, it asks whether to add one more (bumping GNOME's `num-workspaces` by
 one) — decline and the command cancels without changing anything. It then
 prepares the slot's automatic counter and display metadata, and
 switches GNOME to it, best-effort moving the terminal window it was run
-from along with it (via `wmctrl -r :ACTIVE:`) so it doesn't get left
-behind on the old workspace. That last step needs an addressable X11
-window, which native Wayland clients (e.g. many terminal emulators under
-GNOME/Wayland) don't have; when it's unsupported, `et jira start` prints
-a note but still succeeds. It lists your active Jira issues that aren't
-already linked to a workspace, lets you pick one, and links the new
-workspace to it. If the selected issue isn't already "In Progress", it
-asks whether to
+from along with it so it doesn't get left behind on the old workspace.
+Not every terminal emulator can be moved this way; when it's unsupported,
+`et jira start` prints a note but still succeeds. It lists your active
+Jira issues that aren't already linked to a workspace, lets you pick one,
+and links the new workspace to it. If the selected issue isn't already
+"In Progress", it asks whether to
 move it there (showing its current status) and does so via Jira's
 transitions API if you confirm.
 
@@ -365,7 +373,11 @@ branch from the current `HEAD` and switches to it (`git checkout -b`).
 ## Configuration
 
 `et` reads `~/.config/et/config.yaml` (override the directory with the
-`ET_CONFIG_DIR` environment variable). Example:
+`ET_CONFIG_DIR` environment variable). Run `et config` to create or update
+it interactively — it walks through the `jira` block (testing the
+credentials against Jira's API once entered) and the `workspaces` list
+(add/edit/remove entries), pre-filling every field from the existing file
+when one is already present. Example of the resulting file:
 
 ```yaml
 # Jira Cloud REST credentials + query. Required for `et jira start`
@@ -400,7 +412,7 @@ with mode `0600` because it may contain a Jira API token.
 
 The `jql` value is a plain YAML scalar, so quoting it is optional — quote
 it only if it starts with a character YAML reserves (`{`, `[`, `*`, `&`,
-`!`, `%`, `@`) or contains ` #` or `: `.
+`!`, `%`, `@`) or contains `#` or `:`.
 
 When `et jira start` reports no issues but the same JQL finds some in the
 Jira web UI, run `et --debug jira start`: it logs each search request (URL,
@@ -423,35 +435,11 @@ against `/rest/api/3/myself` whenever a search comes back empty.
 > gsettings set org.gnome.desktop.wm.preferences num-workspaces <N>
 > ```
 
-> **Known limitation:** `et jira start` applies its changes (extension
-> counter, then config, then GNOME workspace names) sequentially without a
-> rollback. A failure partway through can leave the config and live GNOME
-> state temporarily out of sync; re-running the command reconciles them.
-
-
-## Development
-
-Common tasks are exposed through a [`Justfile`](./Justfile):
-
-```bash
-just install-requirements   # system tools + uv sync + hooks + GNOME extension
-just lint                   # ruff + ShellCheck
-just static                 # mypy + extension metadata/schema validation
-just test                   # pytest + coverage + deterministic GJS tests
-just test-integ             # Python integration + real headless Shell test
-just test-extension         # isolated interactive nested Shell
-just test-extension-live    # isolated automated real-Shell lifecycle test
-just package-extension      # build and validate only the extension ZIP
-just ops                    # build the Python package and extension ZIP
-```
-
-`just ops` writes the extensions.gnome.org-ready archive to
-`dist/et@seb4stien.github.com.shell-extension.zip`. The package contains only
-the extension runtime, preferences, schema source, stylesheet, metadata, and
-license; generated schemas and repository tooling are excluded.
-
-`prek` (pre-commit) runs linting, static validation, Python tests, and the fast
-GJS unit tests on every commit. It does not launch a real GNOME Shell.
+> **Known limitation:** `et jira start` applies its changes sequentially
+> without a rollback, which can briefly leave config and live GNOME state
+> out of sync on failure — see
+> [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md#known-limitations) for
+> details.
 
 ## License
 

@@ -610,12 +610,14 @@ def _fetch_issue_pages(jira_config: JiraConfig, url: str) -> list[object]:
     return all_issues_raw
 
 
-def _check_credentials(jira_config: JiraConfig) -> None:
+def check_credentials(jira_config: JiraConfig) -> None:
     """Raise `JiraError` if Jira doesn't accept `jira_config`'s email/token.
 
     Unlike the search endpoint, `/myself` has no anonymous mode: it answers
     401 when the credentials aren't usable. A network failure here is
-    ignored, since the caller's own request already succeeded.
+    ignored, since the caller's own request already succeeded (or, for the
+    `et config` wizard, isn't fatal — the user can still save unverified
+    credentials).
     """
     url = jira_config.base_url.rstrip("/") + "/" + MYSELF_PATH
 
@@ -643,7 +645,7 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
     printed to stderr for each one.
 
     Raises `JiraError` if Jira rejects the configured credentials, which an
-    empty result set can otherwise hide (see `_check_credentials`).
+    empty result set can otherwise hide (see `check_credentials`).
     """
     url = jira_config.base_url.rstrip("/") + "/" + SEARCH_PATH
     issues_raw = _fetch_issue_pages(jira_config, url)
@@ -651,7 +653,7 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
     # Jira serves an unauthenticated search anonymously rather than
     # refusing it, so a bad token looks like "you have no issues".
     if not issues_raw:
-        _check_credentials(jira_config)
+        check_credentials(jira_config)
 
     issues: list[JiraIssue] = []
     for raw_issue in issues_raw:

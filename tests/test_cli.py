@@ -11,7 +11,7 @@ import typer
 from typer.testing import CliRunner
 
 from et.cli import _hyperlink, app
-from et.config import EtConfig, JiraConfig, WorkspaceConfigEntry
+from et.config import ConfigError, EtConfig, JiraConfig, WorkspaceConfigEntry
 from et.et_extension import (
     EtExtensionError,
     WorkspaceCounter,
@@ -236,6 +236,81 @@ def test_info_command_shows_full_app_help_when_workspace_is_static(mock_load_con
     assert result.exit_code == 0
     # Falls back to the top-level app help, not just the `info` subcommand's own usage.
     assert "Interact with GNOME/Ubuntu workspaces." in result.stdout
+
+
+def test_config_command_is_registered():
+    result = runner.invoke(app, ["config", "--help"])
+
+    assert result.exit_code == 0
+    assert "config.yaml" in result.stdout
+
+
+@patch("et.cli.save_config")
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("config file not found: ..."))
+def test_config_command_writes_result_when_confirmed(mock_load_config, mock_wizard, mock_save):
+    mock_wizard.return_value = _config()
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert "Wrote" in result.stdout
+    mock_wizard.assert_called_once()
+    # `existing` is `None` since the config file doesn't exist yet.
+    assert mock_wizard.call_args.args[1] is None
+    mock_save.assert_called_once_with(_config())
+
+
+@patch("et.cli.save_config")
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config")
+def test_config_command_passes_existing_config_to_wizard(mock_load_config, mock_wizard, mock_save):
+    existing = _config([WorkspaceConfigEntry(name="mails")])
+    mock_load_config.return_value = existing
+    mock_wizard.return_value = existing
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert mock_wizard.call_args.args[1] is existing
+    mock_save.assert_called_once_with(existing)
+
+
+@patch("et.cli.save_config")
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("config file not found: ..."))
+def test_config_command_reports_cancellation_without_saving(
+    mock_load_config, mock_wizard, mock_save
+):
+    mock_wizard.return_value = None
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.stdout
+    mock_save.assert_not_called()
+
+
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("could not parse config file ..."))
+def test_config_command_reports_load_config_error(mock_load_config, mock_wizard):
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 1
+    assert "Error: could not parse config file" in result.output
+    mock_wizard.assert_not_called()
+
+
+@patch("et.cli.save_config", side_effect=ConfigError("could not write config file ..."))
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("config file not found: ..."))
+def test_config_command_reports_save_config_error(mock_load_config, mock_wizard, mock_save):
+    mock_wizard.return_value = _config()
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 1
+    assert "Error: could not write config file" in result.output
 
 
 @patch("et.cli.delete_active_workspace")

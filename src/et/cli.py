@@ -8,7 +8,16 @@ from typing import TYPE_CHECKING, cast
 
 import typer
 
-from et.config import ConfigError, load_config, load_workspace_names
+from et.config import (
+    VALID_WORKSPACE_TYPES,
+    ConfigError,
+    WorkspaceConfigEntry,
+    get_config_path,
+    load_config,
+    load_workspace_names,
+    save_config,
+)
+from et.config_wizard import ConfigWizardPrompts, run_config_wizard
 from et.duration import format_duration, parse_hours_to_seconds
 from et.et_extension import (
     EtExtensionError,
@@ -193,6 +202,181 @@ def _show_active_workspace_info(ctx: typer.Context) -> None:
     except EtExtensionError as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
+
+
+def _prompt_required(label: str, default: str) -> str:
+    """Prompt for `label`, pre-filling `default` when non-empty (else no default)."""
+    if default:
+        return str(typer.prompt(label, default=default))
+    return str(typer.prompt(label))
+
+
+def _prompt_optional(label: str, default: str) -> str:
+    """Prompt for `label`, defaulting to (and accepting) a blank answer."""
+    return str(typer.prompt(label, default=default))
+
+
+def _prompt_pat(default: str) -> str:
+    """Prompt for the Jira API token, hiding input and letting a blank answer keep `default`."""
+    if default:
+        entered = typer.prompt(
+            "Jira API token (leave blank to keep the current one)",
+            default="",
+            hide_input=True,
+            show_default=False,
+        )
+        return str(entered) or default
+    return str(typer.prompt("Jira API token", hide_input=True))
+
+
+def _resolve_credential_check_failure(message: str) -> str:
+    typer.echo(f"Warning: {message}", err=True)
+    return _prompt_from_list("What do you want to do?", ("retry", "keep", "discard"), "retry")
+
+
+def _format_workspace_entry(entry: WorkspaceConfigEntry) -> str:
+    details = f"{entry.name} (type={entry.type}"
+    if entry.ref:
+        details += f", ref={entry.ref}"
+    if entry.description:
+        details += f", description={entry.description}"
+    return details + ")"
+
+
+def _prompt_workspace_action(entries: list[WorkspaceConfigEntry]) -> str:
+    typer.echo("\nWorkspaces:")
+    if not entries:
+        typer.echo("  (none configured yet)")
+    for position, entry in enumerate(entries, start=1):
+        typer.echo(f"  {position}. {_format_workspace_entry(entry)}")
+
+    return _prompt_from_list(
+        "What do you want to do?",
+        ("add", "edit", "remove", "done"),
+        "add" if not entries else "done",
+    )
+
+
+def _select_workspace_entry(entries: list[WorkspaceConfigEntry], purpose: str) -> int | None:
+    if not entries:
+        typer.echo(f"No workspaces to {purpose}.")
+        return None
+
+    typer.echo(f"Pick a workspace to {purpose} (0 to cancel):")
+    for position, entry in enumerate(entries, start=1):
+        typer.echo(f"  {position}. {entry.name}")
+
+    choice = typer.prompt("Number", default="0")
+    try:
+        selected = int(choice)
+    except ValueError:
+        return None
+    if selected < 1 or selected > len(entries):
+        return None
+    return selected - 1
+
+
+def _prompt_workspace_entry(
+    default: WorkspaceConfigEntry | None,
+) -> WorkspaceConfigEntry | None:
+    default_name = default.name if default else ""
+    name = str(typer.prompt("Workspace name (blank to cancel)", default=default_name))
+    if not name:
+        return None
+
+    workspace_type = _prompt_from_list(
+        "Type", VALID_WORKSPACE_TYPES, default.type if default else "static"
+    )
+
+    ref: str | None = None
+    if workspace_type != "static":
+        default_ref = (default.ref if default else "") or ""
+        entered_ref = typer.prompt("Jira ref (optional, e.g. jira:ISD-321)", default=default_ref)
+        ref = str(entered_ref) or None
+
+    default_description = (default.description if default else "") or ""
+    description = str(typer.prompt("Description (optional)", default=default_description))
+
+    return WorkspaceConfigEntry(
+        name=name,
+        type=workspace_type,
+        ref=ref,
+        description=description or None,
+    )
+
+
+def _confirm_save_config(config: EtConfig) -> bool:
+    typer.echo("\nAbout to write this configuration:")
+    if config.jira is not None:
+        typer.echo(f"  jira.base_url: {config.jira.base_url}")
+        typer.echo(f"  jira.email: {config.jira.email}")
+        typer.echo("  jira.pat: ********")
+        typer.echo(f"  jira.jql: {config.jira.jql}")
+        typer.echo(f"  jira.project_key: {config.jira.project_key or '(none)'}")
+        typer.echo(f"  jira.board_id: {config.jira.board_id or '(none)'}")
+    else:
+        typer.echo("  jira: (not configured)")
+    typer.echo(f"  workspaces: {len(config.workspaces)} entry(ies)")
+    for entry in config.workspaces:
+        typer.echo(f"    - {_format_workspace_entry(entry)}")
+    return typer.confirm(f"Save to {get_config_path()}?", default=True)
+
+
+@app.command("config")
+def config_cmd() -> None:
+    """Interactively create or update `~/.config/et/config.yaml`.
+
+    Walks through the "jira" block (base_url/email/pat/jql/project_key/
+    board_id — testing the credentials against Jira's API once collected,
+    with the option to retry, keep them anyway, or discard the Jira block
+    on failure) and the "workspaces" list (add/edit/remove entries), then
+    writes the result to the config file. Pre-fills every field from the
+    existing config when one is already present.
+    """
+    try:
+        existing: EtConfig | None = load_config()
+    except ConfigError as error:
+        if "config file not found" not in str(error):
+            typer.echo(f"Error: {error}", err=True)
+            raise typer.Exit(code=1) from error
+        existing = None
+
+    prompts = ConfigWizardPrompts(
+        confirm_configure_jira=lambda _has_existing: typer.confirm(
+            "Configure Jira integration?", default=True
+        ),
+        prompt_base_url=lambda default: _prompt_required(
+            "Jira base URL (e.g. https://your-org.atlassian.net)", default
+        ),
+        prompt_email=lambda default: _prompt_required("Jira account email", default),
+        prompt_pat=_prompt_pat,
+        prompt_jql=lambda default: _prompt_required(
+            "JQL query (e.g. assignee = currentUser() AND statusCategory != Done)", default
+        ),
+        prompt_project_key=lambda default: _prompt_optional(
+            "Jira project key (optional, e.g. ISD)", default
+        ),
+        prompt_board_id=lambda default: _prompt_optional("Jira board id (optional)", default),
+        resolve_credential_check_failure=_resolve_credential_check_failure,
+        prompt_workspace_action=_prompt_workspace_action,
+        select_workspace_entry=_select_workspace_entry,
+        prompt_workspace_entry=_prompt_workspace_entry,
+        confirm_save=_confirm_save_config,
+        warn=lambda message: typer.echo(f"Warning: {message}", err=True),
+    )
+
+    result = run_config_wizard(prompts, existing)
+    if result is None:
+        typer.echo("Cancelled.")
+        return
+
+    try:
+        save_config(result)
+    except ConfigError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+    typer.echo(f"Wrote {get_config_path()}")
 
 
 @ws_app.command("rename")
