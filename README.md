@@ -205,13 +205,15 @@ never bypasses the `static` check).
 
 `et jira` wraps the workspace timer and Jira integrations into a single
 lifecycle for one task at a time — it doesn't replace `ws`, which keeps
-working exactly as before.
+working exactly as before. Run `et jira <command> --help` for the full
+details and options of any subcommand.
 
 ```bash
 et info                                      # (or bare `et`) show the active task's Jira issue and time spent
 et jira start                                # pick an active Jira issue and start a task from it
 et jira start ISD-123                        # start a task for a specific issue key directly
 et jira create                               # interactively create a new Jira issue
+et jira create <GITHUB_URL>                  # pre-fill from a GitHub issue/PR
 et jira log-time                             # log the active workspace's tracked time to Jira
 et jira log-time 2h                          # log a manually-specified 2h duration instead
 et jira log-time --all                       # log every workspace with a linked Jira issue, not just the active one
@@ -219,122 +221,8 @@ et jira comment "Looks good"                 # add a comment to the linked Jira 
 et jira status in-progress                   # move the linked issue to "In Progress"
 et jira status                               # show current status, pick a new one from a numbered list
 et jira complete                             # log time, then optionally delete the workspace and close the issue
+et jira log-time -j ISD-123                  # act on a specific issue instead of the active workspace's one
 ```
-
-If Jira accepts a worklog but the local extension counter cannot be reset,
-`et` reports the worklog as successful and prints a counter-only recovery
-command. Do not rerun `log-time` for that counter, since that would duplicate
-the Jira worklog.
-
-`et` with no subcommand shows the same Jira issue details as before, plus
-the elapsed time of the counter bound to the active
-workspace (e.g. `Time spent: 1h 12m 0s`, with `(running)` appended if the
-timer is currently running) — but only when the active workspace is part
-of the managed (non-`static`) pool; otherwise it shows this help text.
-
-`et jira start` allocates the first free (non-`static`, unlinked) workspace
-slot from the fixed pool of GNOME workspaces. If every workspace is already
-taken, it asks whether to add one more (bumping GNOME's `num-workspaces` by
-one) — decline and the command cancels without changing anything. It then
-prepares the slot's automatic counter and display metadata, and
-switches GNOME to it, best-effort moving the terminal window it was run
-from along with it so it doesn't get left behind on the old workspace.
-Not every terminal emulator can be moved this way; when it's unsupported,
-`et jira start` prints a note but still succeeds. It lists your active
-Jira issues that aren't already linked to a workspace, lets you pick one,
-and links the new workspace to it. If the selected issue isn't already
-"In Progress", it asks whether to
-move it there (showing its current status) and does so via Jira's
-transitions API if you confirm.
-
-`et jira start KEY` starts a task for a specific Jira
-issue directly instead of picking one from the active-issues list — it
-fails if `KEY` is already linked to an existing workspace. It follows the
-same steps as above (offering to move the issue to "In Progress" if
-needed), plus one more: if the issue isn't already in one of its
-project's current active sprints, it asks whether to add it to one (using
-the same Agile board auto-discovery/caching as `et jira create --sprint`,
-and requiring `jira.project_key` to be set) — if the board has more than
-one concurrently active sprint, it prompts you to pick which one; if no
-board or active sprint can be resolved, it prints a warning and continues
-without touching the sprint rather than failing the command.
-
-`et jira create [GITHUB_URL]` interactively creates a new Jira issue in
-`jira.project_key` (required in config for this command). It prompts for:
-the issue type (`Bug`/`Story`/`Task`, default `Story` — defaulting to `Bug`
-when `GITHUB_URL` points at a GitHub issue labeled "bug"); the summary
-(pre-filled from the GitHub issue/PR title when a URL is given); whether to
-assign the issue to yourself (default yes, via your `jira.email`); priority
-(`Highest`/`High`/`Medium`/`Low`/`Lowest`, default `Medium`); a component
-picked from the project's component list; whether to add the issue to the
-project's current sprint (default yes — the Agile board is auto-discovered
-on first use and its id saved to `jira.board_id` so later runs skip that
-lookup; if the board has more than one concurrently active sprint, you're
-prompted to pick which one); an estimate in hours (written to the issue's
-time-tracking original estimate); and an optional description (pre-filled
-from the GitHub issue/PR body when a URL is given, with the URL itself
-always appended as a reference). When `GITHUB_URL` is given, it's also
-written to the issue's "Bug link" field, if that custom field exists on
-the Jira instance (looked up by name, like the Sprint field — skipped with a
-warning otherwise). `GITHUB_URL` accepts
-`https://github.com/<owner>/<repo>/issues/<n>` and
-`https://github.com/<owner>/<repo>/pull/<n>` links, fetched via the `gh`
-CLI (which must be installed and authenticated) — if the URL can't be
-parsed or fetched, `et jira create` warns and falls back to blank
-defaults rather than failing outright.
-
-`et jira log-time` reads the elapsed time from the active workspace's counter
-bound to the active workspace, resolves the Jira issue linked to that
-workspace (its `ref`, e.g. set by `et jira start`), and logs it as a
-worklog via Jira's own worklog API (no separate Tempo credential needed —
-worklogs created this way still show up in Tempo timesheets when Tempo is
-configured to sync native Jira worklogs). At least a minute of elapsed time
-is required. On success the counter is reset to 0, unless `--no-reset` is
-given. Given an `Xh` duration instead (e.g. `et jira log-time 2h` or `et
-jira log-time 1.5h`), that duration is logged manually rather than the
-workspace counter's elapsed time — the counter isn't read or reset in
-that case (so `--no-reset` doesn't apply).
-
-`et jira log-time --all` logs every workspace in the `workspaces` config
-list that has a linked Jira issue, instead of only the active one —
-useful for logging a whole day's tracked time across every task at once
-without switching between workspaces. Each linked workspace's own counter is
-logged to its own issue and reset immediately on success (or left
-untouched otherwise); a workspace with less than a minute of elapsed time,
-no prepared counter, or a failing Jira call is skipped (reported at the
-end) rather than stopping the rest from being logged. `--no-reset` still
-applies (to every workspace logged in that run), but `--all` can't be
-combined with an `Xh` duration, `--comment/-m`, or `-j/--jira`, since those
-only make sense for a single workspace/issue.
-
-`et jira comment [MESSAGE]` adds a comment to the Jira issue linked to the
-active workspace (or a different issue via `-j/--jira KEY`). Prompts for
-the message if not given as an argument.
-
-`et jira status [in-progress|blocked]` moves the linked issue directly to
-"In Progress" or "Blocked" (applied immediately, no confirmation). With no
-argument, it shows the linked issue's current status and a numbered list of
-the team's workflow statuses (`Untriaged`, `Triaged`, `In Progress`,
-`Blocked`, `In Review`, `To Be Deployed`, `Done`, `Rejected`) to pick a new
-one from interactively; leave the prompt blank to cancel.
-
-`et jira log-time`, `et jira complete`, `et jira comment`, and `et jira
-status` all accept a `-j`/`--jira KEY` option to act on a specific Jira
-issue instead of the one linked to the active workspace — e.g. `et jira
-comment "Looks good" -j ISD-123` or `et jira status blocked --jira
-ISD-123`. For `comment` and `status`, this also skips workspace resolution
-entirely, so those two work even outside a managed workspace.
-
-`et jira complete` logs the active workspace's tracked time to Jira (like
-`et jira log-time`) and tells you how much it logged. It then asks whether
-to delete the workspace and whether to move the linked Jira issue to
-"Done" — each behind its own confirmation prompt, so both actions are
-skipped unless you confirm them. When you confirm the delete, the workspace
-is removed exactly like `et ws delete` — GNOME's workspace count is
-decremented to reclaim the slot and every non-`static` workspace after it is
-shifted one slot to the left (its counter follows it), so no gap is
-left in the middle of your workspaces. If only a single workspace remains
-(GNOME can't drop below one), its slot is reset to a bare `ET-<n>` instead.
 
 ### Git
 
@@ -344,31 +232,11 @@ et git cb                                     # alias for the above
 et git create-branch -j ISD-1234              # branch off a specific issue instead
 ```
 
-`et git create-branch` (aliased `et git cb`) creates a git branch for the
-current task's Jira issue, following Canonical's
-[PR branch naming convention](https://github.com/canonical/platform-engineering-docs/blob/main/docs/delivery-workflows/github/pull-requests/index.rst):
-`type/scope-short-description-jirakey` (e.g.
-`feat/tcp-wildcard-sni-support-isd-1234`). It defaults to the Jira issue
-linked to the active workspace; pass `-j`/`--jira KEY` to target a
-different issue instead (works outside a managed workspace too, like the
-`et jira` commands' own `-j`/`--jira`).
-
-It first prints the issue's clickable link and summary, then:
-
-- Proposes a **branch type** (one of `feat`/`fix`/`docs`/`chore`/`test`/`ci`)
-  computed from the issue: `Bug` → `fix`, `Story` → `feat`, `Task` →
-  `chore`; a `documentation` label always wins and defaults to `docs`
-  regardless of issue type. Prompts to accept the default or pick a
-  different one from the list — this becomes the branch's `type/` prefix,
-  which can't otherwise be typed in freely.
-- Proposes the `scope-short-description` segment as a slug of the issue
-  summary, editable at the prompt.
-- Appends the resolved Jira key (lowercased) as the branch's trailing
-  identifier — always the actual issue key, not editable.
-
-Fails with a clear error if not run inside a git repository, or if a local
-branch with the computed name already exists. On success, creates the
-branch from the current `HEAD` and switches to it (`git checkout -b`).
+Follows Canonical's
+[PR branch naming convention](https://github.com/canonical/platform-engineering-docs/blob/main/docs/delivery-workflows/github/pull-requests/index.rst)
+(`type/scope-short-description-jirakey`), proposing a branch type and
+description slug from the issue that you can accept or edit. Run
+`et git create-branch --help` for details.
 
 ## Configuration
 
