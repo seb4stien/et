@@ -5,14 +5,14 @@ All notable changes to `et` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-08
+
+Built from `main`, including `feat/native-wayland` (PR #9).
+
 ### Added
 - `et config`: an interactive wizard to create or update
   `~/.config/et/config.yaml` (the `jira` block and the `workspaces` list),
   pre-filling existing values and testing Jira credentials once entered.
-
-## [1.0.0-rc.1]
-
-Release candidate for `v1.0.0`, built from `feat/native-wayland` (PR #9).
 
 ### Changed
 - **Breaking:** `et jira start` now takes the Jira issue key as a
