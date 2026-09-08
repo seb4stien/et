@@ -49,12 +49,14 @@ New to `et`? Here's the fastest path to a working setup on Ubuntu 24.04+
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
+
 3. **Clone the repo and install the GNOME Shell extension:**
 
    ```bash
    git clone <this-repo-url> && cd et
    scripts/install-gnome-shell-extension.sh
    ```
+
 4. **Log out and back in** so GNOME Shell picks up the newly installed
    extension.
 5. **Create your config file interactively:**
@@ -72,6 +74,7 @@ New to `et`? Here's the fastest path to a working setup on Ubuntu 24.04+
    uv run et ws rename focus
    uv run et jira start
    ```
+
 7. **Install globally**, so you can run `et` directly instead of
    `uv run et`:
 
@@ -79,11 +82,7 @@ New to `et`? Here's the fastest path to a working setup on Ubuntu 24.04+
    uv tool install .
    ```
 
-Want to contribute code instead? See [CONTRIBUTING.md](./CONTRIBUTING.md)
-for the development workflow (`just install-requirements` additionally
-pulls in dev/test tooling — `just` itself, plus GJS/ShellCheck/`prek` — on
-top of everything above), and [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
-for how `et` and its GNOME Shell extension are designed internally.
+Want to contribute code instead? See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Requirements
 
@@ -124,14 +123,6 @@ Install and enable it with:
 scripts/install-gnome-shell-extension.sh
 ```
 
-(this also runs automatically as part of `just install-requirements`). By
-default this *copies* the extension into
-`~/.local/share/gnome-shell/extensions/et@seb4stien.github.com` rather than
-symlinking it (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for why).
-If you're actively editing `extension.js`, pass `--dev` (or `--symlink`) to
-symlink instead so you don't need to re-run the script after every change
-(a Shell restart is still required to pick up new code either way).
-
 `gnome-extensions enable` may report the extension "does not exist" the
 first time it's installed — this is expected, since GNOME Shell only scans
 `~/.local/share/gnome-shell/extensions` for new UUIDs at startup; the script
@@ -147,39 +138,7 @@ Open its preferences with:
 gnome-extensions prefs et@seb4stien.github.com
 ```
 
-## Installation
-
-This project uses [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv sync            # create the virtualenv and install et + dependencies
-uv run et --help   # run without installing globally
-```
-
-To install the `et` entry point onto your `PATH`:
-
-```bash
-uv tool install .
-```
-
-## Usage
-
-```bash
-et --help
-```
-
-Run bare (no subcommand), or `et info` explicitly, from a non-`static`
-workspace to see its linked Jira issue and tracked time at a glance:
-
-```bash
-et         # same output as `et jira log-time` would act on, without logging anything
-et info    # explicit, named equivalent of the above
-```
-
-From a `static` workspace, or one that isn't part of the managed pool,
-both fall back to the usual help text.
-
-### Workspaces
+### Workspaces features
 
 ```bash
 et ws rename focus          # rename the active workspace to "focus"
@@ -188,25 +147,7 @@ et ws delete                # delete the active workspace, shifting later ones l
 et ws delete --force        # same, even if still linked to a Jira issue (counter is lost)
 ```
 
-`et ws delete` frees a workspace slot. It only works on a
-"free" workspace — not `static`, and not linked to a Jira issue (run `et
-jira complete` first if it still is). Every non-`static` workspace after the
-deleted one (and its counter) shifts one slot to the left to close the
-gap, then the now-empty trailing slot is reclaimed by decrementing GNOME's
-workspace count (`num-workspaces`). The exception is when the
-highest-numbered workspace is `static` — shrinking would swallow it, so the
-count is left unchanged and the freed slot just becomes a bare `ET-<n>`.
-Refuses to delete the last remaining workspace. `--force` bypasses the
-Jira-linked check for assigned/in-progress workspaces — its counter is
-discarded rather than logged, so log the time first if you need it (`--force`
-never bypasses the `static` check).
-
-### Tasks
-
-`et jira` wraps the workspace timer and Jira integrations into a single
-lifecycle for one task at a time — it doesn't replace `ws`, which keeps
-working exactly as before. Run `et jira <command> --help` for the full
-details and options of any subcommand.
+### Jira features
 
 ```bash
 et info                                      # (or bare `et`) show the active task's Jira issue and time spent
@@ -224,7 +165,7 @@ et jira complete                             # log time, then optionally delete 
 et jira log-time -j ISD-123                  # act on a specific issue instead of the active workspace's one
 ```
 
-### Git
+### Git features
 
 ```bash
 et git create-branch                         # branch off the active workspace's linked issue
@@ -240,12 +181,7 @@ description slug from the issue that you can accept or edit. Run
 
 ## Configuration
 
-`et` reads `~/.config/et/config.yaml` (override the directory with the
-`ET_CONFIG_DIR` environment variable). Run `et config` to create or update
-it interactively — it walks through the `jira` block (testing the
-credentials against Jira's API once entered) and the `workspaces` list
-(add/edit/remove entries), pre-filling every field from the existing file
-when one is already present. Example of the resulting file:
+`et` reads `~/.config/et/config.yaml`.
 
 ```yaml
 # Jira Cloud REST credentials + query. Required for `et jira start`
