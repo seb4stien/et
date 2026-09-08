@@ -138,6 +138,8 @@ Open its preferences with:
 gnome-extensions prefs et@seb4stien.github.com
 ```
 
+## CLI features
+
 ### Workspaces features
 
 ```bash
