@@ -12,6 +12,7 @@ environment variable override).
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -219,9 +220,28 @@ def save_config(config: EtConfig) -> None:
     data["workspaces"] = workspaces_data
 
     path = get_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, sort_keys=False))
-    path.chmod(0o600)
+    serialized = yaml.safe_dump(data, sort_keys=False)
+    temporary_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            dir=path.parent,
+            text=True,
+        )
+        temporary_path = Path(temporary_name)
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "w") as temporary_file:
+            temporary_file.write(serialized)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except OSError as exc:
+        raise ConfigError(f"could not write config file {path}: {exc}") from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 

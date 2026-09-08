@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from et.et_extension import EtExtensionError
 from et.gsettings import GSettingsError
 from et.workspaces import (
     WorkspaceError,
@@ -36,16 +37,18 @@ WMCTRL_OUTPUT = (
 )
 
 
+@patch("et.workspaces._is_wayland_session", return_value=False)
 @patch("et.workspaces.shutil.which", return_value="/usr/bin/wmctrl")
 @patch("et.workspaces.subprocess.run")
-def test_get_active_workspace_index_returns_marked_index(mock_run, _mock_which):
+def test_get_active_workspace_index_returns_marked_index(mock_run, _mock_which, _mock_wayland):
     mock_run.return_value = _completed(stdout=WMCTRL_OUTPUT)
     assert get_active_workspace_index() == 1
 
 
+@patch("et.workspaces._is_wayland_session", return_value=False)
 @patch("et.workspaces.shutil.which", return_value="/usr/bin/wmctrl")
 @patch("et.workspaces.subprocess.run")
-def test_get_active_workspace_index_raises_when_no_marker(mock_run, _mock_which):
+def test_get_active_workspace_index_raises_when_no_marker(mock_run, _mock_which, _mock_wayland):
     mock_run.return_value = _completed(
         stdout="0  - DG: 1920x1080  VP: 0,0  WA: 0,0 1920x1055  Workspace 1\n"
     )
@@ -53,9 +56,46 @@ def test_get_active_workspace_index_raises_when_no_marker(mock_run, _mock_which)
         get_active_workspace_index()
 
 
+@patch("et.workspaces._is_wayland_session", return_value=False)
 @patch("et.workspaces.shutil.which", return_value=None)
-def test_get_active_workspace_index_raises_when_wmctrl_missing(_mock_which):
+def test_get_active_workspace_index_raises_when_wmctrl_missing(_mock_which, _mock_wayland):
     with pytest.raises(WorkspaceError, match="wmctrl"):
+        get_active_workspace_index()
+
+
+@pytest.mark.parametrize(
+    ("xdg_session_type", "wayland_display", "expected"),
+    [
+        ("wayland", "", True),
+        ("x11", "", False),
+        ("", "wayland-0", True),
+        ("", "", False),
+    ],
+)
+def test_is_wayland_session_detects_from_env(xdg_session_type, wayland_display, expected):
+    from et.workspaces import _is_wayland_session
+
+    env = {"XDG_SESSION_TYPE": xdg_session_type, "WAYLAND_DISPLAY": wayland_display}
+    with patch("et.workspaces.os.environ", env):
+        assert _is_wayland_session() is expected
+
+
+@patch("et.workspaces._is_wayland_session", return_value=True)
+@patch("et.workspaces.et_extension.get_active_workspace_index", return_value=2)
+def test_get_active_workspace_index_delegates_to_et_extension_on_wayland(
+    mock_get_index, _mock_wayland
+):
+    assert get_active_workspace_index() == 2
+    mock_get_index.assert_called_once_with()
+
+
+@patch("et.workspaces._is_wayland_session", return_value=True)
+@patch(
+    "et.workspaces.et_extension.get_active_workspace_index",
+    side_effect=EtExtensionError("the et GNOME Shell extension doesn't seem to be installed"),
+)
+def test_get_active_workspace_index_wraps_et_extension_error(mock_get_index, _mock_wayland):
+    with pytest.raises(WorkspaceError, match="et GNOME Shell extension"):
         get_active_workspace_index()
 
 

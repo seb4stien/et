@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from et.config import (
@@ -247,6 +249,21 @@ def test_save_config_round_trips_through_load_config(config_dir):
     assert load_config() == config
     mode = (config_dir / "config.yaml").stat().st_mode & 0o777
     assert mode == 0o600
+
+
+@patch("et.config.os.replace", side_effect=OSError("replace failed"))
+def test_save_config_preserves_existing_file_when_atomic_replace_fails(
+    _mock_replace, config_dir
+):
+    path = config_dir / "config.yaml"
+    original = "workspaces:\n  - name: original\n"
+    path.write_text(original)
+
+    with pytest.raises(ConfigError, match="could not write config file"):
+        save_config(EtConfig(jira=None, workspaces=[WorkspaceConfigEntry(name="updated")]))
+
+    assert path.read_text() == original
+    assert list(config_dir.glob(".config.yaml.*")) == []
 
 
 def test_load_workspace_names_still_returns_plain_name_list(config_dir):

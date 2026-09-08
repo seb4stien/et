@@ -1,27 +1,27 @@
 """Orchestrates the `et jira` command group: a friendlier, task-centric
-layer on top of the Tracker and Jira integrations (`et.tracker`,
+layer on top of the et extension and Jira integrations (`et.et_extension`,
 `et.jira`, `et.jira_ref`, `et.jira_time`), plus `et ws`.
 
 `et jira start` allocates a free workspace slot among GNOME's fixed set of
 workspaces (prompting, via an injected `confirm_grow` callback, to add one
-more workspace when they're all taken), creates its Tracker timer, and
+more workspace when they're all taken), prepares its extension counter, and
 switches GNOME to it — moving the terminal window it's run from along with
-it — picking the slot's name/description/Jira link from the user's active
-Jira issues (and offering to move the selected issue to "In Progress" if it
-isn't already). `et jira complete` logs the active workspace's tracked time
-to Jira (reusing `et.jira_time.log_time_for_current_workspace`), then — each
-behind its own confirmation prompt — optionally deletes that workspace
-(reclaiming its GNOME workspace slot the same way `et ws delete` does:
-shrinking GNOME's workspace count and shifting every non-`static` slot
-after it one slot to the left, moving each one's Tracker timer along with
-it, then switching to a surviving workspace) and/or moves the linked Jira
-issue to "Done". `et jira status`/`et jira comment` reuse the same
-active-workspace-to-issue-key resolution (`et.jira_time.resolve_issue_key`,
-or `resolve_active_issue` when the workspace index is also needed)
-to transition the linked issue's status or add a comment to it. Every
-current-ticket action also accepts an `issue_key` override (`et jira`'s
-`-j/--jira KEY`), letting it target a different Jira issue than the one
-linked to the active workspace. Has no
+it — picking the slot's name/description/Jira link/original estimate from
+the user's active Jira issues (and offering to move the selected issue to
+"In Progress" if it isn't already). `et jira complete` logs the active
+workspace's tracked time to Jira (reusing
+`et.jira_time.log_time_for_current_workspace`), then — each behind its own
+confirmation prompt — optionally deletes that workspace (reclaiming its
+GNOME workspace slot the same way `et ws delete` does: shrinking GNOME's
+workspace count and shifting every non-`static` slot after it one slot to
+the left, moving each one's extension counter along with it, then switching
+to a surviving workspace) and/or moves the linked Jira issue to "Done". `et
+jira status`/`et jira comment` reuse the same active-workspace-to-issue-key
+resolution (`et.jira_time.resolve_issue_key`, or `resolve_active_issue`
+when the workspace index is also needed) to transition the linked issue's
+status or add a comment to it. Every current-ticket action also accepts an
+`issue_key` override (`et jira`'s `-j/--jira KEY`), letting it target a
+different Jira issue than the one linked to the active workspace. Has no
 Typer/CLI dependency.
 """
 
@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from et import tracker, workspaces
+from et import et_extension, workspaces
 from et.config import (
     ConfigError,
     EtConfig,
@@ -39,6 +39,7 @@ from et.config import (
     load_config,
     save_config,
 )
+from et.et_extension import EtExtensionError
 from et.jira import (
     JiraBoardWithoutSprintsError,
     JiraError,
@@ -57,7 +58,6 @@ from et.jira import (
 )
 from et.jira_ref import JIRA_REF_PREFIX, default_entry, jira_key_from_ref, truncate_summary
 from et.jira_time import LogTimeResult, log_time_for_current_workspace, resolve_issue_key
-from et.tracker import TrackerError, find_timer_for_workspace
 from et.workspaces import WorkspaceError
 from et.ws import WsDeleteError, delete_active_workspace
 
@@ -86,6 +86,20 @@ class TaskError(RuntimeError):
     """Raised when a task cannot be created or completed."""
 
 
+def _task_error_with_rollback(
+    error: Exception,
+    rollback_errors: list[str],
+    *,
+    extension_state_uncertain: bool = False,
+) -> TaskError:
+    if not rollback_errors and not extension_state_uncertain:
+        return TaskError(str(error))
+    details = list(rollback_errors)
+    if extension_state_uncertain:
+        details.append("the extension may have applied the D-Bus mutation before reporting failure")
+    return TaskError(f"{error}; operation may be partially applied: {'; '.join(details)}")
+
+
 @dataclass(frozen=True)
 class TaskCreateResult:
     """Summary of what `create_task_workspace` did."""
@@ -93,7 +107,6 @@ class TaskCreateResult:
     workspace_index: int
     name: str
     ref: str | None
-    timer_created: bool
     window_moved: bool
 
 
@@ -125,6 +138,7 @@ def create_task_workspace(
     name: str,
     description: str | None = None,
     ref: str | None = None,
+    estimate_seconds: int | None = None,
     *,
     confirm_grow: Callable[[int], bool] = lambda count: False,
 ) -> TaskCreateResult | None:
@@ -135,17 +149,19 @@ def create_task_workspace(
     `confirm_grow(count)`; when it returns True the workspace count is bumped
     by one (via `set_workspace_count`) and the new slot is used, otherwise
     this returns `None` without changing anything. Saves the updated config,
-    creates the slot's Tracker timer, renames the GNOME workspaces to match,
-    switches the active GNOME workspace to the new slot, and best-effort moves
-    the currently focused window (typically the terminal the command was run
+    prepares the slot's extension counter (with a generic display label
+    — `description` if given, else `name` — and `estimate_seconds`, defaulting
+    to 0 when not given), renames the GNOME workspaces to match, switches the
+    active GNOME workspace to the new slot, and best-effort moves the
+    currently focused window (typically the terminal the command was run
     from) there too — this last step is skipped without failing the whole
     command if unsupported (e.g. for native Wayland clients, which have no
     addressable X11 window for `wmctrl` to move); `TaskCreateResult.window_moved`
     reports whether it worked.
 
     Raises `ConfigError` if the config file is missing/malformed, and
-    `WorkspaceError`/`TrackerError` (via `TaskError`) if the underlying
-    GNOME/Tracker operations fail.
+    `WorkspaceError`/`EtExtensionError` (via `TaskError`) if the underlying
+    GNOME/extension operations fail.
     """
     config: EtConfig = load_config()
 
@@ -173,17 +189,54 @@ def create_task_workspace(
         description=description,
     )
 
+    label = description if description is not None else name
+    original_names = [entry.name for entry in config.workspaces]
+    original_names.extend(
+        default_entry(index, "dynamic").name
+        for index in range(len(original_names), count)
+    )
+    count_changed = False
+    config_saved = False
+    names_changed = False
+    counter_prepared = False
     try:
         if grew:
             workspaces.set_workspace_count(count + 1)
-        timer_created = tracker.prepare_timer_for_workspace(
-            slot, count + 1 if grew else count
-        )[1]
+            count_changed = True
         save_config(replace(config, workspaces=workspaces_list))
+        config_saved = True
         workspaces.rename_all_workspaces([entry.name for entry in workspaces_list])
+        names_changed = True
+        et_extension.prepare_workspace(slot, label, estimate_seconds or 0)
+        counter_prepared = True
         workspaces.switch_to_workspace(slot)
-    except (WorkspaceError, TrackerError, ConfigError) as exc:
-        raise TaskError(str(exc)) from exc
+    except (WorkspaceError, EtExtensionError, ConfigError) as exc:
+        rollback_errors: list[str] = []
+        if counter_prepared:
+            try:
+                et_extension.remove_workspace(slot)
+            except EtExtensionError as rollback_error:
+                rollback_errors.append(f"counter cleanup failed: {rollback_error}")
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        if count_changed:
+            try:
+                workspaces.set_workspace_count(count)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-count restore failed: {rollback_error}")
+        raise _task_error_with_rollback(
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
 
     # Best-effort: moving the focused window across workspaces requires an
     # addressable X11 window, which native Wayland clients (e.g. many
@@ -200,7 +253,6 @@ def create_task_workspace(
         workspace_index=slot,
         name=name,
         ref=ref,
-        timer_created=timer_created,
         window_moved=window_moved,
     )
 
@@ -309,16 +361,7 @@ def add_comment_to_current_workspace(body: str, *, issue_key: str | None = None)
 
 def persist_board_id(config: EtConfig, jira: JiraConfig, board_id: str) -> None:
     """Save `board_id` as `jira.board_id`, so later runs skip board discovery."""
-    updated_jira = JiraConfig(
-        base_url=jira.base_url,
-        email=jira.email,
-        pat=jira.pat,
-        jql=jira.jql,
-        priority_order=jira.priority_order,
-        project_key=jira.project_key,
-        board_id=board_id,
-    )
-    save_config(EtConfig(jira=updated_jira, workspaces=config.workspaces))
+    save_config(replace(config, jira=replace(jira, board_id=board_id)))
 
 
 def resolve_board_id(config: EtConfig, jira: JiraConfig, project_key: str) -> str | None:
@@ -368,7 +411,7 @@ def fetch_active_sprints_or_warn(
     is reported via `warn` and treated as "skip the sprint" (empty list)
     — this function owns all such warnings, so callers should not warn
     again on an empty return. Shared by `et jira create --sprint` and `et
-    jira start -k`.
+    jira start KEY`.
     """
     try:
         sprints = fetch_active_sprints(jira, board_id)
@@ -403,7 +446,7 @@ def _maybe_transition_to_in_progress(
     """Move `issue` to "In Progress" if it isn't already and `confirm_transition` agrees.
 
     Shared by `create_task_from_jira` (interactive picker) and
-    `create_task_from_jira_key` (`-k/--key`): both offer the same
+    `create_task_from_jira_key` (positional `KEY`): both offer the same
     "not already In Progress? move it there" step before creating the
     workspace.
     """
@@ -470,6 +513,7 @@ def create_task_from_jira(
         name=truncate_summary(issue.summary),
         description=issue.summary,
         ref=f"{JIRA_REF_PREFIX}{issue.key}",
+        estimate_seconds=issue.original_estimate_seconds,
         confirm_grow=confirm_grow,
     )
 
@@ -483,7 +527,7 @@ def ensure_issue_in_active_sprint(
 ) -> bool:
     """Add `issue_key` to one of its project's current active sprints, if needed.
 
-    Used by `create_task_from_jira_key` (`et jira start -k`). Degrades
+    Used by `create_task_from_jira_key` (`et jira start KEY`). Degrades
     gracefully rather than failing the whole command: if `jira.project_key`
     isn't set, no Agile board can be resolved/discovered for it, or no
     sprint is currently active, `warn(...)` is called and this returns
@@ -596,6 +640,7 @@ def create_task_from_jira_key(
         name=truncate_summary(issue.summary),
         description=issue.summary,
         ref=f"{JIRA_REF_PREFIX}{issue.key}",
+        estimate_seconds=issue.original_estimate_seconds,
         confirm_grow=confirm_grow,
     )
     if result is None:
@@ -609,17 +654,17 @@ def _free_workspace_slot(index: int) -> None:
     Delegates to `delete_active_workspace` — the same logic `et ws delete`
     uses — so the workspace is actually removed rather than merely blanked:
     GNOME's workspace count is decremented, every non-`static` slot after
-    the freed one (and its Tracker timer) shifts one slot to the left to
-    close the gap, and GNOME switches to a surviving workspace. `force=True`
+    the freed one (and its extension counter) shifts one slot to the left
+    to close the gap, and GNOME switches to a surviving workspace. `force=True`
     because the slot is still linked to the just-completed Jira issue (whose
-    Tracker timer was already reset to zero by the logging step, so
+    extension counter was already reset to zero by the logging step, so
     discarding it loses nothing).
 
     Falls back to resetting the slot to a bare "ET-<n>" entry (without
     touching GNOME's workspace count) when there is only a single workspace
     left, since GNOME can't drop below one workspace.
 
-    Raises `TaskError` if the underlying config/tracker/GNOME operations
+    Raises `TaskError` if the underlying config/extension/GNOME operations
     fail.
     """
     try:
@@ -638,30 +683,46 @@ def _free_workspace_slot(index: int) -> None:
 
 
 def _reset_workspace_slot(index: int) -> None:
-    """Reset workspace `index` to a bare "ET-<n>" slot and drop its timer.
+    """Reset workspace `index` to a bare "ET-<n>" slot and drop its counter.
 
     Used when the workspace can't be reclaimed by shrinking GNOME's
     workspace count (only one workspace remains): clears the slot's
-    name/ref/description and discards its (already-reset) Tracker timer,
-    leaving GNOME's workspace count untouched.
+    name/ref/description and discards its (already-reset) extension
+    counter, leaving GNOME's workspace count untouched.
 
-    Raises `TaskError` if the underlying config/tracker operations fail.
+    Raises `TaskError` if the underlying config/extension operations fail.
     """
     config: EtConfig = load_config()
     workspaces_list = list(config.workspaces)
     if index < len(workspaces_list):
         workspaces_list[index] = default_entry(index, workspaces_list[index].type)
 
+    original_names = [entry.name for entry in config.workspaces]
+    config_saved = False
+    names_changed = False
     try:
-        entries = tracker.load_timers()
-        stale_timer = find_timer_for_workspace(entries, index)
-        if stale_timer is not None:
-            entries.remove(stale_timer)
-            tracker.save_timers_with_reload(entries, "clearing timer after completing a task")
         save_config(replace(config, workspaces=workspaces_list))
+        config_saved = True
         workspaces.rename_all_workspaces([entry.name for entry in workspaces_list])
-    except (ConfigError, WorkspaceError, TrackerError) as exc:
-        raise TaskError(str(exc)) from exc
+        names_changed = True
+        et_extension.remove_workspace(index)
+    except (ConfigError, WorkspaceError, EtExtensionError) as exc:
+        rollback_errors: list[str] = []
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        raise _task_error_with_rollback(
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
 
 
 def complete_task_for_current_workspace(
@@ -676,17 +737,20 @@ def complete_task_for_current_workspace(
 
     Delegates the logging step to
     `et.jira_time.log_time_for_current_workspace` (which already resets the
-    tracker on success) and, once it succeeds, calls `on_logged(log_result)`
+    counter on success) and, once it succeeds, calls `on_logged(log_result)`
     so the caller can report the logged time before any prompts. Logs
     against `issue_key` if given (e.g. via `-j/--jira`), instead of the
     issue linked to the active workspace — workspace deletion still applies
     to the active workspace regardless, since it's not tied to which issue
     the time was logged against.
 
-    Then `confirm_delete(log_result)` is called: if it returns `True`, the
-    workspace is deleted the same way `et ws delete` does — GNOME's
+    Then `confirm_delete(log_result)` is called, unless Jira accepted the
+    worklog but the counter reset failed. In that partial-success case the
+    workspace is deliberately kept in place so the recovery command's slot
+    number remains safe. If deletion is confirmed, the workspace is deleted
+    the same way `et ws delete` does — GNOME's
     workspace count is decremented to reclaim the slot, every non-`static`
-    slot after it (with its Tracker timer) shifts one slot to the left to
+    slot after it (with its extension counter) shifts one slot to the left to
     close the gap, GNOME workspace names are renamed to match, and GNOME
     switches to a surviving workspace. When only a single workspace remains
     (so GNOME can't shrink further) the slot is just reset to a bare
@@ -707,7 +771,7 @@ def complete_task_for_current_workspace(
     on_logged(log_result)
 
     workspace_freed = False
-    if confirm_delete(log_result):
+    if log_result.counter_reset_error is None and confirm_delete(log_result):
         _free_workspace_slot(log_result.workspace_index)
         workspace_freed = True
 

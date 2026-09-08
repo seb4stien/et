@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -16,17 +19,69 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
+
       - name: Set up Python
         run: uv python install 3.12
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Lint (ruff)
-        run: uv run ruff check .
+      - name: Install extension test tools
+        run: scripts/install-gnome-test-requirements.sh
 
-      - name: Static analysis (mypy)
-        run: uv run mypy src
+      - name: Lint
+        run: just lint
 
-      - name: Tests (pytest + coverage)
-        run: uv run pytest
+      - name: Static analysis
+        run: just static
+
+      - name: Tests
+        run: just test
+
+      - name: Package extension
+        run: just package-extension
+
+      - name: Upload extension package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnome-shell-extension
+          path: dist/et@seb4stien.github.com.shell-extension.zip
+
+  gnome-shell:
+    name: GNOME Shell ${{ matrix.shell }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            shell: "46"
+          - os: ubuntu-26.04
+            shell: "50"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
+
+      - name: Install GNOME Shell test dependencies
+        run: scripts/install-gnome-test-requirements.sh
+
+      - name: Verify scripts
+        run: shellcheck scripts/*.sh scripts/lib/*.sh
+
+      - name: Run real Shell lifecycle test
+        env:
+          CI: "true"
+          ET_DIAGNOSTICS_DIR: ${{ github.workspace }}/artifacts/gnome-${{ matrix.shell }}
+        run: just test-extension-live --strict --expected-shell-major ${{ matrix.shell }}
+
+      - name: Upload Shell diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnome-shell-${{ matrix.shell }}-diagnostics
+          path: artifacts/gnome-${{ matrix.shell }}
+          if-no-files-found: ignore

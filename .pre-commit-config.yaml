@@ -3,18 +3,17 @@ repos:
     hooks:
       - id: ruff
         name: ruff check
-        entry: uv run ruff check
+        entry: just lint
         language: system
-        types: [python]
+        pass_filenames: false
       - id: mypy
-        name: mypy
-        entry: uv run mypy src
+        name: static analysis
+        entry: just static
         language: system
-        types: [python]
         pass_filenames: false
       - id: pytest
         name: pytest
-        entry: uv run pytest
+        entry: just test
         language: system
         pass_filenames: false
         always_run: true

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 import requests
 
@@ -60,6 +61,7 @@ class JiraIssue:
     summary: str
     priority: str
     status: str = ""
+    original_estimate_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -114,32 +116,60 @@ def text_to_adf(text: str) -> dict[str, object]:
     }
 
 
-def _get_json(jira_config: JiraConfig, url: str, params: dict[str, str] | None = None) -> object:
-    """GET `url` with Jira Basic auth and return the parsed JSON body.
-
-    Raises `JiraError` if the request cannot be made, Jira returns a
-    non-200 status, or the body isn't valid JSON.
-    """
+def _request(
+    jira_config: JiraConfig,
+    method: Literal["GET", "POST"],
+    url: str,
+    *,
+    expected_statuses: tuple[int, ...],
+    params: dict[str, str] | None = None,
+    json: dict[str, object] | None = None,
+) -> requests.Response:
+    """Send one authenticated Jira request and validate its status."""
     try:
-        response = requests.get(
-            url,
-            params=params,
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
+        if method == "GET":
+            response = requests.get(
+                url,
+                params=params,
+                auth=(jira_config.email, jira_config.pat),
+                timeout=30,
+            )
+        else:
+            response = requests.post(
+                url,
+                json=json,
+                auth=(jira_config.email, jira_config.pat),
+                timeout=30,
+            )
     except requests.RequestException as exc:
         raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
 
-    if response.status_code != 200:
+    if response.status_code not in expected_statuses:
         raise JiraError(
             f"Jira API request to {url} failed with status {response.status_code}: "
             f"{response.text.strip()[:500]}"
         )
+    return response
 
+
+def _response_json(response: requests.Response) -> object:
+    """Parse a Jira response body as JSON with a consistent error."""
     try:
         return response.json()
     except ValueError as exc:
         raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+
+
+def _get_json(jira_config: JiraConfig, url: str, params: dict[str, str] | None = None) -> object:
+    """GET `url` with Jira Basic auth and return the parsed JSON body."""
+    response = _request(
+        jira_config,
+        "GET",
+        url,
+        expected_statuses=(200,),
+        params=params,
+    )
+    return _response_json(response)
 
 
 def _jira_url(jira_config: JiraConfig, path: str) -> str:
@@ -223,15 +253,13 @@ def fetch_active_sprints(jira_config: JiraConfig, board_id: str) -> list[JiraSpr
     """
     url = _jira_url(jira_config, BOARD_SPRINT_PATH_TEMPLATE.format(board_id=board_id))
 
-    try:
-        response = requests.get(
-            url,
-            params={"state": "active"},
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
+    response = _request(
+        jira_config,
+        "GET",
+        url,
+        expected_statuses=(200, 400),
+        params={"state": "active"},
+    )
 
     if response.status_code == 400 and _mentions_unsupported_sprints(response.text):
         raise JiraBoardWithoutSprintsError(
@@ -244,10 +272,7 @@ def fetch_active_sprints(jira_config: JiraConfig, board_id: str) -> list[JiraSpr
             f"{response.text.strip()[:500]}"
         )
 
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+    payload = _response_json(response)
 
     values = payload.get("values") if isinstance(payload, dict) else None
     if not isinstance(values, list):
@@ -276,7 +301,7 @@ def fetch_issue_sprint(jira_config: JiraConfig, issue_key: str) -> JiraSprint | 
     Calls Jira's Agile API `GET /rest/agile/1.0/issue/{key}?fields=sprint`
     endpoint, which — unlike the plain issue API — exposes the issue's
     current sprint directly without needing to look up the "Sprint" custom
-    field's id first. Used by `et jira start -k` to check whether an issue
+    field's id first. Used by `et jira start KEY` to check whether an issue
     already belongs to the project's active sprint before adding it.
     Raises `JiraError` if the request cannot be made or Jira rejects it.
     """
@@ -302,27 +327,19 @@ def add_issue_to_sprint(jira_config: JiraConfig, sprint_id: str, issue_key: str)
 
     Calls Jira's Agile API `POST /rest/agile/1.0/sprint/{sprint_id}/issue`
     endpoint (which returns 204 No Content on success) with
-    `{"issues": [issue_key]}`. Used by `et jira start -k` to bring an issue
+    `{"issues": [issue_key]}`. Used by `et jira start KEY` to bring an issue
     into the project's current active sprint when it isn't already there.
     Raises `JiraError` if the request cannot be made or Jira rejects it.
     """
     url = _jira_url(jira_config, SPRINT_ISSUE_PATH_TEMPLATE.format(sprint_id=sprint_id))
 
-    try:
-        response = requests.post(
-            url,
-            json={"issues": [issue_key]},
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
-
-    if response.status_code not in (200, 204):
-        raise JiraError(
-            f"Jira API request to {url} failed with status {response.status_code}: "
-            f"{response.text.strip()[:500]}"
-        )
+    _request(
+        jira_config,
+        "POST",
+        url,
+        expected_statuses=(200, 204),
+        json={"issues": [issue_key]},
+    )
 
 
 def fetch_field_id_by_name(jira_config: JiraConfig, field_name: str) -> str | None:
@@ -365,26 +382,14 @@ def create_issue(jira_config: JiraConfig, fields: dict[str, object]) -> str:
     """
     url = _jira_url(jira_config, ISSUE_PATH)
 
-    try:
-        response = requests.post(
-            url,
-            json={"fields": fields},
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
-
-    if response.status_code not in (200, 201):
-        raise JiraError(
-            f"Jira API request to {url} failed with status {response.status_code}: "
-            f"{response.text.strip()[:500]}"
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+    response = _request(
+        jira_config,
+        "POST",
+        url,
+        expected_statuses=(200, 201),
+        json={"fields": fields},
+    )
+    payload = _response_json(response)
 
     key = payload.get("key") if isinstance(payload, dict) else None
     if not isinstance(key, str) or not key:
@@ -409,26 +414,14 @@ def create_worklog(
     if comment:
         payload["comment"] = text_to_adf(comment)
 
-    try:
-        response = requests.post(
-            url,
-            json=payload,
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
-
-    if response.status_code not in (200, 201):
-        raise JiraError(
-            f"Jira API request to {url} failed with status {response.status_code}: "
-            f"{response.text.strip()[:500]}"
-        )
-
-    try:
-        payload_response = response.json()
-    except ValueError as exc:
-        raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+    response = _request(
+        jira_config,
+        "POST",
+        url,
+        expected_statuses=(200, 201),
+        json=payload,
+    )
+    payload_response = _response_json(response)
 
     if not isinstance(payload_response, dict):
         raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
@@ -446,26 +439,14 @@ def create_comment(jira_config: JiraConfig, issue_key: str, body: str) -> dict[s
     """
     url = jira_config.base_url.rstrip("/") + "/" + COMMENT_PATH_TEMPLATE.format(key=issue_key)
 
-    try:
-        response = requests.post(
-            url,
-            json={"body": text_to_adf(body)},
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
-
-    if response.status_code not in (200, 201):
-        raise JiraError(
-            f"Jira API request to {url} failed with status {response.status_code}: "
-            f"{response.text.strip()[:500]}"
-        )
-
-    try:
-        payload_response = response.json()
-    except ValueError as exc:
-        raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+    response = _request(
+        jira_config,
+        "POST",
+        url,
+        expected_statuses=(200, 201),
+        json={"body": text_to_adf(body)},
+    )
+    payload_response = _response_json(response)
 
     if not isinstance(payload_response, dict):
         raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
@@ -493,17 +474,39 @@ def fetch_issue_status(jira_config: JiraConfig, issue_key: str) -> str:
     return name
 
 
-def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
-    """Return `issue_key`'s summary, priority, and status as a `JiraIssue`.
+def _parse_original_estimate_seconds(fields: dict[str, object]) -> int | None:
+    """Return `fields.timetracking.originalEstimateSeconds` if it's a valid duration.
 
-    Calls Jira's `GET /rest/api/3/issue/{key}?fields=summary,priority,status`
-    endpoint. Used by `et jira start -k` to look up an issue given directly
+    Must be present and a nonnegative `int` (explicitly excluding `bool`,
+    which is a subclass of `int` in Python) to be considered valid;
+    otherwise returns `None` rather than raising, since a missing/malformed
+    estimate shouldn't fail the whole issue fetch.
+    """
+    timetracking = fields.get("timetracking")
+    if not isinstance(timetracking, dict):
+        return None
+
+    value = timetracking.get("originalEstimateSeconds")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+
+    return value
+
+
+def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
+    """Return `issue_key`'s summary, priority, status, and original estimate as a `JiraIssue`.
+
+    Calls Jira's
+    `GET /rest/api/3/issue/{key}?fields=summary,priority,status,timetracking`
+    endpoint. Used by `et jira start KEY` to look up an issue given directly
     by key, rather than picked from `fetch_active_issues`'s candidate list.
     Raises `JiraError` if the request cannot be made, Jira rejects it, or
     the response has no usable summary/status.
     """
     url = _jira_url(jira_config, f"{ISSUE_PATH}/{issue_key}")
-    payload = _get_json(jira_config, url, params={"fields": "summary,priority,status"})
+    payload = _get_json(
+        jira_config, url, params={"fields": "summary,priority,status,timetracking"}
+    )
     if not isinstance(payload, dict):
         raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
 
@@ -528,6 +531,7 @@ def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
         summary=summary,
         priority=priority if isinstance(priority, str) else "",
         status=status,
+        original_estimate_seconds=_parse_original_estimate_seconds(fields),
     )
 
 
@@ -570,32 +574,23 @@ def _fetch_issue_pages(jira_config: JiraConfig, url: str) -> list[object]:
     next_page_token: str | None = None
 
     while True:
-        params: dict[str, str] = {"jql": jira_config.jql, "fields": "summary,priority,status"}
+        params: dict[str, str] = {
+            "jql": jira_config.jql,
+            "fields": "summary,priority,status,timetracking",
+        }
         if next_page_token is not None:
             params["nextPageToken"] = next_page_token
 
         logger.debug("GET %s as %s with params %r", url, jira_config.email, params)
 
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                auth=(jira_config.email, jira_config.pat),
-                timeout=30,
-            )
-        except requests.RequestException as exc:
-            raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
-
-        if response.status_code != 200:
-            raise JiraError(
-                f"Jira API request to {url} failed with status {response.status_code}: "
-                f"{response.text.strip()[:500]}"
-            )
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+        response = _request(
+            jira_config,
+            "GET",
+            url,
+            expected_statuses=(200,),
+            params=params,
+        )
+        payload = _response_json(response)
 
         issues_raw = payload.get("issues") if isinstance(payload, dict) else None
         if not isinstance(issues_raw, list):
@@ -615,12 +610,14 @@ def _fetch_issue_pages(jira_config: JiraConfig, url: str) -> list[object]:
     return all_issues_raw
 
 
-def _check_credentials(jira_config: JiraConfig) -> None:
+def check_credentials(jira_config: JiraConfig) -> None:
     """Raise `JiraError` if Jira doesn't accept `jira_config`'s email/token.
 
     Unlike the search endpoint, `/myself` has no anonymous mode: it answers
     401 when the credentials aren't usable. A network failure here is
-    ignored, since the caller's own request already succeeded.
+    ignored, since the caller's own request already succeeded (or, for the
+    `et config` wizard, isn't fatal — the user can still save unverified
+    credentials).
     """
     url = jira_config.base_url.rstrip("/") + "/" + MYSELF_PATH
 
@@ -648,7 +645,7 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
     printed to stderr for each one.
 
     Raises `JiraError` if Jira rejects the configured credentials, which an
-    empty result set can otherwise hide (see `_check_credentials`).
+    empty result set can otherwise hide (see `check_credentials`).
     """
     url = jira_config.base_url.rstrip("/") + "/" + SEARCH_PATH
     issues_raw = _fetch_issue_pages(jira_config, url)
@@ -656,7 +653,7 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
     # Jira serves an unauthenticated search anonymously rather than
     # refusing it, so a bad token looks like "you have no issues".
     if not issues_raw:
-        _check_credentials(jira_config)
+        check_credentials(jira_config)
 
     issues: list[JiraIssue] = []
     for raw_issue in issues_raw:
@@ -666,15 +663,22 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
         if not isinstance(key, str) or not key:
             logger.warning("skipping Jira issue with missing or invalid 'key': %r", raw_issue)
             continue
-        fields = raw_issue.get("fields", {})
-        priority_field = fields.get("priority") or {}
-        status_field = fields.get("status") or {}
+        fields = raw_issue.get("fields")
+        if not isinstance(fields, dict):
+            logger.warning("skipping Jira issue %s with invalid 'fields': %r", key, fields)
+            continue
+        priority_field = fields.get("priority")
+        status_field = fields.get("status")
+        priority = priority_field.get("name") if isinstance(priority_field, dict) else ""
+        status = status_field.get("name") if isinstance(status_field, dict) else ""
+        summary = fields.get("summary")
         issues.append(
             JiraIssue(
                 key=key,
-                summary=fields.get("summary") or "",
-                priority=priority_field.get("name") or "",
-                status=status_field.get("name") or "",
+                summary=summary if isinstance(summary, str) else "",
+                priority=priority if isinstance(priority, str) else "",
+                status=status if isinstance(status, str) else "",
+                original_estimate_seconds=_parse_original_estimate_seconds(fields),
             )
         )
 
@@ -702,25 +706,8 @@ def fetch_transitions(jira_config: JiraConfig, issue_key: str) -> list[JiraTrans
     """
     url = jira_config.base_url.rstrip("/") + "/" + TRANSITIONS_PATH_TEMPLATE.format(key=issue_key)
 
-    try:
-        response = requests.get(
-            url,
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
-
-    if response.status_code != 200:
-        raise JiraError(
-            f"Jira API request to {url} failed with status {response.status_code}: "
-            f"{response.text.strip()[:500]}"
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise JiraError(f"could not parse Jira API response as JSON: {exc}") from exc
+    response = _request(jira_config, "GET", url, expected_statuses=(200,))
+    payload = _response_json(response)
 
     transitions_raw = payload.get("transitions") if isinstance(payload, dict) else None
     if not isinstance(transitions_raw, list):
@@ -733,12 +720,14 @@ def fetch_transitions(jira_config: JiraConfig, issue_key: str) -> list[JiraTrans
         transition_id = raw_transition.get("id")
         if not isinstance(transition_id, str) or not transition_id:
             continue
-        to_field = raw_transition.get("to") or {}
+        to_field = raw_transition.get("to")
+        to_status = to_field.get("name") if isinstance(to_field, dict) else ""
+        name = raw_transition.get("name")
         transitions.append(
             JiraTransition(
                 id=transition_id,
-                name=raw_transition.get("name") or "",
-                to_status=to_field.get("name") or "",
+                name=name if isinstance(name, str) else "",
+                to_status=to_status if isinstance(to_status, str) else "",
             )
         )
 
@@ -754,18 +743,10 @@ def transition_issue(jira_config: JiraConfig, issue_key: str, transition_id: str
     """
     url = jira_config.base_url.rstrip("/") + "/" + TRANSITIONS_PATH_TEMPLATE.format(key=issue_key)
 
-    try:
-        response = requests.post(
-            url,
-            json={"transition": {"id": transition_id}},
-            auth=(jira_config.email, jira_config.pat),
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        raise JiraError(f"could not reach Jira at {url}: {exc}") from exc
-
-    if response.status_code not in (200, 204):
-        raise JiraError(
-            f"Jira API request to {url} failed with status {response.status_code}: "
-            f"{response.text.strip()[:500]}"
-        )
+    _request(
+        jira_config,
+        "POST",
+        url,
+        expected_statuses=(200, 204),
+        json={"transition": {"id": transition_id}},
+    )

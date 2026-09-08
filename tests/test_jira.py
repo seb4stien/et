@@ -13,6 +13,7 @@ from et.jira import (
     JiraError,
     JiraIssue,
     JiraSprint,
+    JiraTransition,
     add_issue_to_sprint,
     create_comment,
     create_issue,
@@ -55,10 +56,18 @@ def _response(issues: list[dict], next_page_token: str | None = None) -> MagicMo
     return response
 
 
-def _issue(key: str, summary: str, priority: str, status: str | None = None) -> dict:
+def _issue(
+    key: str,
+    summary: str,
+    priority: str,
+    status: str | None = None,
+    original_estimate_seconds: int | None = None,
+) -> dict:
     fields: dict[str, object] = {"summary": summary, "priority": {"name": priority}}
     if status is not None:
         fields["status"] = {"name": status}
+    if original_estimate_seconds is not None:
+        fields["timetracking"] = {"originalEstimateSeconds": original_estimate_seconds}
     return {"key": key, "fields": fields}
 
 
@@ -87,7 +96,10 @@ def test_fetch_active_issues_passes_jql_and_basic_auth(mock_get):
 
     args, kwargs = mock_get.call_args_list[0]
     assert args[0] == "https://example.atlassian.net/rest/api/3/search/jql"
-    assert kwargs["params"] == {"jql": config.jql, "fields": "summary,priority,status"}
+    assert kwargs["params"] == {
+        "jql": config.jql,
+        "fields": "summary,priority,status,timetracking",
+    }
     assert kwargs["auth"] == (config.email, config.pat)
 
 
@@ -121,6 +133,22 @@ def test_fetch_active_issues_skips_issue_without_key(mock_get, caplog):
 
     assert [issue.key for issue in issues] == ["PROJ-2"]
     assert "missing or invalid 'key'" in caplog.text
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_issues_skips_issue_with_invalid_fields(mock_get, caplog):
+    mock_get.return_value = _response(
+        [
+            {"key": "PROJ-1", "fields": []},
+            _issue("PROJ-2", "Has valid fields", "Low"),
+        ]
+    )
+
+    with caplog.at_level("WARNING", logger="et.jira"):
+        issues = fetch_active_issues(_config())
+
+    assert [issue.key for issue in issues] == ["PROJ-2"]
+    assert "invalid 'fields'" in caplog.text
 
 
 @patch("et.jira.requests.get")
@@ -253,6 +281,26 @@ def test_fetch_active_issues_defaults_status_to_empty_string_when_missing(mock_g
     assert issues[0].status == ""
 
 
+@patch("et.jira.requests.get")
+def test_fetch_active_issues_parses_original_estimate_seconds(mock_get):
+    mock_get.return_value = _response(
+        [_issue("PROJ-1", "Task A", "High", original_estimate_seconds=1800)]
+    )
+
+    issues = fetch_active_issues(_config())
+
+    assert issues[0].original_estimate_seconds == 1800
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_issues_defaults_original_estimate_seconds_to_none_when_missing(mock_get):
+    mock_get.return_value = _response([_issue("PROJ-1", "Task A", "High")])
+
+    issues = fetch_active_issues(_config())
+
+    assert issues[0].original_estimate_seconds is None
+
+
 def _json_response(status_code: int, payload: object) -> MagicMock:
     response = MagicMock()
     response.status_code = status_code
@@ -354,6 +402,18 @@ def test_fetch_transitions_skips_transitions_without_id(mock_get):
     transitions = fetch_transitions(_config(), "PROJ-1")
 
     assert transitions == []
+
+
+@patch("et.jira.requests.get")
+def test_fetch_transitions_tolerates_invalid_nested_fields(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        {"transitions": [{"id": "31", "name": ["invalid"], "to": ["invalid"]}]},
+    )
+
+    transitions = fetch_transitions(_config(), "PROJ-1")
+
+    assert transitions == [JiraTransition(id="31", name="", to_status="")]
 
 
 @patch("et.jira.requests.get")
@@ -491,7 +551,47 @@ def test_fetch_issue_returns_summary_priority_and_status(mock_get):
     )
     args, kwargs = mock_get.call_args
     assert args[0] == "https://example.atlassian.net/rest/api/3/issue/PROJ-1"
-    assert kwargs["params"] == {"fields": "summary,priority,status"}
+    assert kwargs["params"] == {"fields": "summary,priority,status,timetracking"}
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_parses_original_estimate_seconds(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        {
+            "fields": {
+                "summary": "A summary",
+                "status": {"name": "To Do"},
+                "timetracking": {"originalEstimateSeconds": 3600},
+            }
+        },
+    )
+
+    issue = fetch_issue(_config(), "PROJ-1")
+
+    assert issue.original_estimate_seconds == 3600
+
+
+@pytest.mark.parametrize(
+    "timetracking",
+    [
+        None,
+        {},
+        {"originalEstimateSeconds": -1},
+        {"originalEstimateSeconds": "3600"},
+        {"originalEstimateSeconds": True},
+    ],
+)
+@patch("et.jira.requests.get")
+def test_fetch_issue_ignores_invalid_original_estimate_seconds(mock_get, timetracking):
+    fields: dict[str, object] = {"summary": "A summary", "status": {"name": "To Do"}}
+    if timetracking is not None:
+        fields["timetracking"] = timetracking
+    mock_get.return_value = _json_response(200, {"fields": fields})
+
+    issue = fetch_issue(_config(), "PROJ-1")
+
+    assert issue.original_estimate_seconds is None
 
 
 @patch("et.jira.requests.get")

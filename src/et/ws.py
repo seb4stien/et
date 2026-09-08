@@ -3,7 +3,7 @@
 `shift_workspaces_left` is also reused by `et.task` (`et jira complete`'s
 "shift everything after the freed slot left, instead of leaving a gap"
 logic), which is why it lives here rather than directly in `et.workspaces`
-(which has no config/tracker dependency). Has no Typer/CLI dependency.
+(which has no config/counter dependency). Has no Typer/CLI dependency.
 """
 
 from __future__ import annotations
@@ -15,10 +15,14 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from et import tracker, workspaces
+from et import duration, et_extension, workspaces
 from et.config import ConfigError, EtConfig, WorkspaceConfigEntry, load_config, save_config
+from et.et_extension import (
+    EtExtensionError,
+    WorkspaceCounter,
+    WorkspaceCounterNotFoundError,
+)
 from et.jira_ref import default_entry, jira_key_from_ref
-from et.tracker import TimerEntry, TrackerError, find_timer_for_workspace
 from et.workspaces import WorkspaceError
 
 
@@ -28,6 +32,23 @@ class WsDeleteError(RuntimeError):
 
 class WsOrganizeError(RuntimeError):
     """Raised when the dynamic workspaces cannot be reorganized."""
+
+
+def _error_with_rollback(
+    error_type: type[WsDeleteError] | type[WsOrganizeError],
+    error: Exception,
+    rollback_errors: list[str],
+    *,
+    extension_state_uncertain: bool = False,
+) -> WsDeleteError | WsOrganizeError:
+    if not rollback_errors and not extension_state_uncertain:
+        return error_type(str(error))
+    details = list(rollback_errors)
+    if extension_state_uncertain:
+        details.append("the extension may have applied the D-Bus mutation before reporting failure")
+    return error_type(
+        f"{error}; operation may be partially applied: {'; '.join(details)}"
+    )
 
 
 @dataclass(frozen=True)
@@ -44,48 +65,43 @@ class OrganizeCandidate:
 
     slot: int
     entry: WorkspaceConfigEntry
-    timer: TimerEntry | None
+    counter: WorkspaceCounter | None
 
 
 @dataclass(frozen=True)
 class OrganizePlanRow:
     """One row of a computed `ws organize` plan: what ends up in `new_slot`.
 
-    `entry` and `timer` are the *post-move* values (timer already has its
-    `workspaceId`/`name` updated to `new_slot`, if it moved).
+    `entry` is the *post-move* value.
     """
 
     old_slot: int
     new_slot: int
     entry: WorkspaceConfigEntry
-    timer: TimerEntry | None
 
 
 def shift_workspaces_left(
-    workspaces_list: list[WorkspaceConfigEntry], entries: list[TimerEntry], freed_index: int
-) -> bool:
+    workspaces_list: list[WorkspaceConfigEntry], freed_index: int
+) -> list[tuple[int, int]]:
     """Shift every non-`static` slot after `freed_index` one slot to the left.
 
     `freed_index` (already reset to a bare "ET-<n>" entry by the caller) is
     filled with whatever was in the next non-static slot, that slot is
     filled with the one after it, and so on, leaving a single bare slot at
-    the *end* of the non-static range instead of a gap in the middle. Each
-    moved workspace's bound Tracker timer (if any) follows it — its
-    `workspaceId`/`name` are updated in place — and a stale timer left
-    behind at `freed_index` (e.g. the just-reset-to-zero timer of a task
-    that was just completed, or an already-deleted workspace's leftover
-    timer) is discarded rather than duplicated.
+    the *end* of the non-static range instead of a gap in the middle.
 
-    Mutates `workspaces_list` and `entries` in place. Returns whether
-    `entries` changed (so the caller knows whether to save it). No-op if
+    Mutates `workspaces_list` in place. Returns the ordered list of
+    `(old_index, new_index)` moves describing how each slot's extension
+    counter needs to be relocated to mirror the config change — callers
+    pass this straight to `et.et_extension.remap_workspaces`. Empty if
     `freed_index` isn't a non-static slot, or is already the last one.
     """
     non_static_slots = [i for i, entry in enumerate(workspaces_list) if entry.type != "static"]
     if freed_index not in non_static_slots:
-        return False
+        return []
 
     freed_position = non_static_slots.index(freed_index)
-    timers_changed = False
+    moves: list[tuple[int, int]] = []
 
     for position in range(freed_position, len(non_static_slots) - 1):
         dst = non_static_slots[position]
@@ -107,18 +123,9 @@ def shift_workspaces_left(
             )
         workspaces_list[src] = default_entry(src, workspaces_list[src].type)
 
-        existing_at_dst = find_timer_for_workspace(entries, dst)
-        if existing_at_dst is not None:
-            entries.remove(existing_at_dst)
-            timers_changed = True
+        moves.append((src, dst))
 
-        moved_timer = find_timer_for_workspace(entries, src)
-        if moved_timer is not None:
-            moved_timer["workspaceId"] = dst
-            moved_timer["name"] = f"ET-{dst + 1}"
-            timers_changed = True
-
-    return timers_changed
+    return moves
 
 
 def _pad_workspaces_list(
@@ -160,10 +167,10 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
     slot to reuse). Raises `WsDeleteError` if the active workspace is
     `static`; use `et jira complete` (or `et jira log-time`) first to free
     a Jira-linked workspace, or pass `force=True` to delete it anyway
-    (its Tracker timer, if any, is discarded rather than logged).
+    (its extension counter, if any, is discarded rather than logged).
 
-    Every non-static workspace after the active one (and its Tracker
-    timer) is shifted one slot to the left, same as `et jira complete`, so
+    Every non-static workspace after the active one (and its extension
+    counter) is shifted one slot to the left, same as `et jira complete`, so
     the freed bare slot ends up at the end of the non-static range. That
     now-empty trailing slot is then removed: GNOME's workspace count
     (`num-workspaces`) is decremented by one. The one exception is when the
@@ -175,7 +182,7 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
     Raises `ConfigError` if the config file is missing/malformed,
     `WorkspaceError` (unwrapped) if the active workspace can't be
     determined, and `WsDeleteError` if the checks above fail or the
-    underlying GNOME/Tracker operations fail.
+    underlying GNOME/extension operations fail.
     """
     config: EtConfig = load_config()
     index = workspaces.get_active_workspace_index()
@@ -189,6 +196,7 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
         raise WsDeleteError("cannot delete the last remaining workspace")
 
     workspaces_list = _pad_workspaces_list(config.workspaces, max(count, index + 1))
+    original_names = [item.name for item in workspaces_list[:count]]
 
     entry = workspaces_list[index]
     if entry.type == "static":
@@ -200,23 +208,9 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
             "(or pass --force to delete it anyway)"
         )
 
-    try:
-        entries = tracker.load_timers()
-    except TrackerError as exc:
-        raise WsDeleteError(str(exc)) from exc
-
     workspaces_list[index] = default_entry(index, entry.type)
 
-    # Discard the deleted workspace's own Tracker timer up front. The shift
-    # below only removes it as a side effect of moving a later timer into
-    # this slot, so it would be left orphaned when there's nothing to shift
-    # (e.g. deleting the last non-static workspace).
-    deleted_timer = find_timer_for_workspace(entries, index)
-    if deleted_timer is not None:
-        entries.remove(deleted_timer)
-
-    timers_changed = shift_workspaces_left(workspaces_list, entries, index)
-    timers_changed = timers_changed or deleted_timer is not None
+    moves = shift_workspaces_left(workspaces_list, index)
 
     # Reclaim the freed slot by shrinking GNOME's workspace count, unless the
     # highest-numbered workspace is static (shrinking removes the last GNOME
@@ -229,18 +223,54 @@ def delete_active_workspace(*, force: bool = False) -> WsDeleteResult:
     saved_list = list(workspaces_list)
     _trim_trailing_default_entries(saved_list)
 
+    config_saved = False
+    names_changed = False
+    count_changed = False
     try:
-        if timers_changed:
-            tracker.save_timers_with_reload(entries, "shifting timers after deleting a workspace")
+        save_config(replace(config, workspaces=saved_list))
+        config_saved = True
+        workspaces.rename_all_workspaces(rename_names)
+        names_changed = True
         if shrink:
             workspaces.set_workspace_count(new_count)
-        save_config(replace(config, workspaces=saved_list))
-        # Rename after any shrink so the workspace-names array matches the
-        # (possibly reduced) set of live GNOME workspaces.
-        workspaces.rename_all_workspaces(rename_names)
+            count_changed = True
+        # Remapping is simultaneous: when moves exist, the deleted slot is
+        # overwritten by the first source and the final source is removed.
+        # A standalone remove is only needed when there is nothing to shift.
+        if moves:
+            et_extension.remap_workspaces(moves)
+        else:
+            et_extension.remove_workspace(index)
+    except (ConfigError, WorkspaceError, EtExtensionError) as exc:
+        rollback_errors: list[str] = []
+        if count_changed:
+            try:
+                workspaces.set_workspace_count(count)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-count restore failed: {rollback_error}")
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        raise _error_with_rollback(
+            WsDeleteError,
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
+
+    try:
         workspaces.switch_to_workspace(min(index, new_count - 1))
-    except (ConfigError, WorkspaceError, TrackerError) as exc:
-        raise WsDeleteError(str(exc)) from exc
+    except WorkspaceError as exc:
+        raise WsDeleteError(
+            f"workspace was deleted, but switching to the surviving workspace failed: {exc}"
+        ) from exc
 
     return WsDeleteResult(workspace_index=index, remaining_workspaces=new_count)
 
@@ -261,28 +291,34 @@ def prepare_organize(
 
 
 def list_organize_candidates(
-    workspaces_list: list[WorkspaceConfigEntry], slots: list[int], entries: list[TimerEntry]
+    workspaces_list: list[WorkspaceConfigEntry], slots: list[int]
 ) -> list[OrganizeCandidate]:
-    """Return one `OrganizeCandidate` per slot in `slots`, in the given order."""
-    return [
-        OrganizeCandidate(
-            slot=slot, entry=workspaces_list[slot], timer=find_timer_for_workspace(entries, slot)
+    """Return one `OrganizeCandidate` per slot in `slots`, in the given order.
+
+    Fetches each slot's counter directly from the extension. A free slot that
+    has never been prepared has no counter and is represented by `None`;
+    other extension failures still propagate.
+    """
+    candidates = []
+    for slot in slots:
+        try:
+            counter = et_extension.get_workspace_counter(slot)
+        except WorkspaceCounterNotFoundError:
+            counter = None
+        candidates.append(
+            OrganizeCandidate(slot=slot, entry=workspaces_list[slot], counter=counter)
         )
-        for slot in slots
-    ]
+    return candidates
 
 
 def format_organize_candidate_line(candidate: OrganizeCandidate) -> str:
     """Format one `OrganizeCandidate` as a single tab-separated editor line."""
     key = jira_key_from_ref(candidate.entry.ref) or "-"
-    if candidate.timer is not None:
-        elapsed = candidate.timer.get("timeElapsed", 0)
-        seconds = elapsed if isinstance(elapsed, (int, float)) else 0
-        running = " (running)" if candidate.timer.get("running") else ""
-        timer_desc = f"{tracker.format_duration(seconds)}{running}"
-    else:
-        timer_desc = "no timer"
-    return f"{candidate.slot + 1}\t{candidate.entry.name}\t{key}\t{timer_desc}"
+    if candidate.counter is None:
+        return f"{candidate.slot + 1}\t{candidate.entry.name}\t{key}\tno counter"
+    running = " (running)" if candidate.counter.running else ""
+    counter_desc = f"{duration.format_duration(candidate.counter.elapsed_seconds)}{running}"
+    return f"{candidate.slot + 1}\t{candidate.entry.name}\t{key}\t{counter_desc}"
 
 
 def build_organize_editor_content(candidates: list[OrganizeCandidate]) -> str:
@@ -298,7 +334,7 @@ def build_organize_editor_content(candidates: list[OrganizeCandidate]) -> str:
         "# Do not add, remove, or duplicate lines -- only reorder them.",
         "# Lines starting with '#' (and blank lines) are ignored.",
         "#",
-        "# slot\tname\tjira\ttimer",
+        "# slot\tname\tjira\tcounter",
     ]
     lines = [format_organize_candidate_line(candidate) for candidate in candidates]
     return "\n".join(header + lines) + "\n"
@@ -337,27 +373,22 @@ def parse_organize_order(lines: list[str], valid_slots: list[int]) -> list[int]:
 
 def build_organize_plan(
     workspaces_list: list[WorkspaceConfigEntry],
-    entries: list[TimerEntry],
     slots: list[int],
     new_order: list[int],
 ) -> list[OrganizePlanRow]:
     """Compute the result of permuting `slots`' contents according to `new_order`.
 
-    `new_order[i]` is the *original* slot whose entry/timer ends up at
-    `slots[i]`. Since this is a closed permutation over the same slot set
-    (unlike `shift_workspaces_left`'s partial shift), every slot is both a
-    source and a destination exactly once, so no entry or Tracker timer is
-    ever dropped or orphaned — each row just describes where its old
-    slot's content is going. A moved timer (its slot actually changes) has
-    its `workspaceId`/`name` updated to match its new slot, matching the
-    "ET-<n>" convention `shift_workspaces_left` already uses; an unmoved
-    timer is returned unchanged.
+    `new_order[i]` is the *original* slot whose entry ends up at `slots[i]`.
+    Since this is a closed permutation over the same slot set (unlike
+    `shift_workspaces_left`'s partial shift), every slot is both a source
+    and a destination exactly once, so no entry or counter is ever dropped
+    or orphaned — each row just describes where its old slot's content is
+    going.
     """
     if sorted(new_order) != sorted(slots):
         raise WsOrganizeError("new_order must be a permutation of slots")
 
     old_entries_by_slot = {slot: workspaces_list[slot] for slot in slots}
-    old_timers_by_slot = {slot: find_timer_for_workspace(entries, slot) for slot in slots}
 
     rows = []
     for position, src_slot in enumerate(new_order):
@@ -370,21 +401,7 @@ def build_organize_plan(
             description=source_entry.description,
         )
 
-        source_timer = old_timers_by_slot[src_slot]
-        moved_timer: TimerEntry | None = None
-        if source_timer is not None:
-            if src_slot == dst_slot:
-                moved_timer = source_timer
-            else:
-                moved_timer = dict(source_timer)
-                moved_timer["workspaceId"] = dst_slot
-                moved_timer["name"] = f"ET-{dst_slot + 1}"
-
-        rows.append(
-            OrganizePlanRow(
-                old_slot=src_slot, new_slot=dst_slot, entry=moved_entry, timer=moved_timer
-            )
-        )
+        rows.append(OrganizePlanRow(old_slot=src_slot, new_slot=dst_slot, entry=moved_entry))
 
     return rows
 
@@ -392,42 +409,55 @@ def build_organize_plan(
 def apply_organize_plan(
     config: EtConfig,
     workspaces_list: list[WorkspaceConfigEntry],
-    entries: list[TimerEntry],
     plan: list[OrganizePlanRow],
 ) -> None:
-    """Persist a `build_organize_plan` result: config, Tracker timers, GNOME names.
+    """Persist a `build_organize_plan` result: config, extension counters, GNOME names.
 
-    Rebuilds `workspaces_list` slot-by-slot from `plan`, and rebuilds
-    `entries` by dropping every timer bound to an affected slot and
-    re-adding each row's (possibly re-indexed) timer — safe because `plan`
-    is a closed permutation of the same slot set, so every affected slot
-    gets exactly one timer back. Raises `WsOrganizeError` wrapping any
-    `ConfigError`/`WorkspaceError`/`TrackerError`.
+    Rebuilds `workspaces_list` slot-by-slot from `plan`, and relocates every
+    moved slot's counter with a single atomic `remap_workspaces` call — safe
+    because `plan` is a closed permutation of the same slot set, so nothing
+    is ever freed. Raises `WsOrganizeError` wrapping any
+    `ConfigError`/`WorkspaceError`/`EtExtensionError`.
     """
     new_workspaces_list = list(workspaces_list)
     for row in plan:
         new_workspaces_list[row.new_slot] = row.entry
 
-    affected_slots = {row.new_slot for row in plan}
-    new_entries = [entry for entry in entries if entry.get("workspaceId") not in affected_slots]
-    for row in plan:
-        if row.timer is not None:
-            new_entries.append(row.timer)
-
-    timers_changed = any(row.old_slot != row.new_slot and row.timer is not None for row in plan)
+    moves = [(row.old_slot, row.new_slot) for row in plan if row.old_slot != row.new_slot]
 
     saved_list = list(new_workspaces_list)
     _trim_trailing_default_entries(saved_list)
 
     rename_names = [item.name for item in new_workspaces_list]
 
+    original_names = [item.name for item in workspaces_list]
+    config_saved = False
+    names_changed = False
     try:
-        if timers_changed:
-            tracker.save_timers_with_reload(new_entries, "reorganizing workspaces")
         save_config(replace(config, workspaces=saved_list))
+        config_saved = True
         workspaces.rename_all_workspaces(rename_names)
-    except (ConfigError, WorkspaceError, TrackerError) as exc:
-        raise WsOrganizeError(str(exc)) from exc
+        names_changed = True
+        if moves:
+            et_extension.remap_workspaces(moves)
+    except (ConfigError, WorkspaceError, EtExtensionError) as exc:
+        rollback_errors: list[str] = []
+        if names_changed:
+            try:
+                workspaces.rename_all_workspaces(original_names)
+            except WorkspaceError as rollback_error:
+                rollback_errors.append(f"workspace-name restore failed: {rollback_error}")
+        if config_saved:
+            try:
+                save_config(config)
+            except ConfigError as rollback_error:
+                rollback_errors.append(f"config restore failed: {rollback_error}")
+        raise _error_with_rollback(
+            WsOrganizeError,
+            exc,
+            rollback_errors,
+            extension_state_uncertain=isinstance(exc, EtExtensionError),
+        ) from exc
 
 
 def open_in_editor(content: str) -> str:

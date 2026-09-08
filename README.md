@@ -1,138 +1,162 @@
 # et
 
 `et` is a small command-line tool for **tracking effort** and **managing your
-Ubuntu/GNOME workspaces**. It renames GNOME workspaces, drives the
-[Tracker](https://extensions.gnome.org/extension/3212/tracker/) GNOME Shell
-extension's per-workspace timers, and can link workspaces to Jira issues to
-log time against them.
+Ubuntu/GNOME workspaces**. It renames GNOME workspaces, automatically tracks
+time spent on managed workspaces through its own GNOME Shell extension, and
+can link workspaces to Jira issues to log time against them.
 
 ## Features
 
-- **`et`** (no subcommand) / **`et info`** — in a non-`static` workspace,
-  shows the Jira issue linked to it plus its tracked time; otherwise shows
-  this help.
-- **`et ws rename`** — rename the active workspace (or all of them from config).
-- **`et ws delete`** — delete the active (free) workspace, shifting later ones left.
-- **`et jira [start|create|log-time|complete|comment|status]`** — a friendlier,
-  task-centric layer that creates a workspace + Tracker timer for a task
-  (picked straight from your active Jira issues, optionally moving it to "In
-  Progress"), interactively creates new Jira issues (optionally pre-filled
-  from a GitHub issue/PR URL), completes a task by logging its tracked time
-  to Jira and optionally freeing the slot and moving the issue to "Done",
-  adds a comment to the linked issue, and moves the linked issue through its
-  workflow (directly to "In Progress"/"Blocked", or interactively picked from
-  a numbered list of the team's workflow statuses).
+- **`et jira [start|create|log-time|complete|comment|status]`**: interact and align your workspaces with Jira from the command line:
+  - `create`: wrapper to create Jira issue from the command line (can take GitHub PR as input)
+  - `start`: let you select and assigned task, create a workspace associated to it, and track the time you spend on it.
+  - `log-time`: log your current progress (typically to do it on a daily-basis)
+  - `complete`: log the time spent, and move the issue to Done.
+  - `comment`: add a comment to the ticket.
+  - `status`: show and let you update the status.
+- **`et`** (no subcommand) / **`et info`**: show the Jira issue linked to the workspace (if any).
 - **`et git create-branch`** (alias **`et git cb`**) — create (and switch
   to) a git branch named after the current task's Jira issue, following
   Canonical's `type/scope-short-description-jirakey` branch naming
   convention.
+- **`et ws rename`** — rename the active workspace (or all of them from config).
+- **`et ws delete`** — delete the active (free) workspace, shifting later ones left.
+
+## Getting started
+
+New to `et`? Here's the fastest path to a working setup on Ubuntu 24.04+
+(adapt package names if you're on a different distribution):
+
+1. **Install the system packages `et` needs:**
+
+   ```bash
+   sudo apt update
+   sudo apt install libglib2.0-bin gnome-shell
+   ```
+
+   - `libglib2.0-bin` provides `gsettings`/`gdbus` (workspace renaming and
+     talking to the GNOME Shell extension).
+   - `gnome-shell` provides `gnome-extensions` (install/enable the
+     extension) — already present on any GNOME desktop.
+   - Optionally, [`gh`](https://cli.github.com/) (`sudo apt install gh`,
+     then `gh auth login`) if you want `et jira create <GITHUB_URL>` to
+     pre-fill from a GitHub issue/PR.
+
+   Python **3.12+** is required — Ubuntu 24.04+ ships it by default
+   (`python3 --version` to check).
+2. **Install [uv](https://docs.astral.sh/uv/):**
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+3. **Clone the repo and install the GNOME Shell extension:**
+
+   ```bash
+   git clone <this-repo-url> && cd et
+   scripts/install-gnome-shell-extension.sh
+   ```
+
+4. **Log out and back in** so GNOME Shell picks up the newly installed
+   extension.
+5. **Create your config file interactively:**
+
+   ```bash
+   uv run et config
+   ```
+
+   Walks you through the `jira` block and your `workspaces` list — see
+   [Configuration](#configuration) for the file format it writes.
+6. **Try it out:**
+
+   ```bash
+   uv run et --help
+   uv run et ws rename focus
+   uv run et jira start
+   ```
+
+7. **Install globally**, so you can run `et` directly instead of
+   `uv run et`:
+
+   ```bash
+   uv tool install .
+   ```
+
+Want to contribute code instead? See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Requirements
 
-`et` shells out to standard GNOME/Ubuntu tooling, which must be available on
-`PATH`:
+`et` shells out to standard GNOME/Ubuntu tooling, which must be available
+on `PATH`:
 
 - [`gsettings`](https://manpages.ubuntu.com/manpages/en/man1/gsettings.1.html)
-  — read/write GNOME workspace names and the Tracker extension's timers.
-- [`wmctrl`](https://manpages.ubuntu.com/manpages/en/man1/wmctrl.1.html)
-  — detect the active workspace (`sudo apt install wmctrl`).
+  — read/write GNOME workspace names and settings.
+- [`gdbus`](https://manpages.ubuntu.com/manpages/en/man1/gdbus.1.html)
+  — communicate with the `et` GNOME Shell extension.
 - [`gnome-extensions`](https://manpages.ubuntu.com/manpages/en/man1/gnome-extensions.1.html)
-  — reload the Tracker extension around timer writes.
-- The **Tracker** GNOME Shell extension (`tracker@aliakseiz.github.com`),
-  installed and enabled, for `et jira`'s timer functionality.
+  — install, enable, and configure the bundled extension.
+- The bundled **et Workspace Timer** GNOME Shell extension
+  (`et@seb4stien.github.com`), installed and enabled. It supports the GNOME
+  Shell releases used by Ubuntu 24.04 and Ubuntu 26.04 (GNOME 46 and 50).
 - [`gh`](https://cli.github.com/) — installed and authenticated, only
   needed for `et jira create <GITHUB_URL>`'s summary/description prefill.
 
-Python **3.12+** is required.
+Python **3.12+** is required. [`just`](https://github.com/casey/just) is
+only needed for the `Justfile`-based development workflow — see
+[CONTRIBUTING.md](./CONTRIBUTING.md).
 
-### Recommended: show workspace names in the switcher
+### The `et` GNOME Shell extension
 
-Since `et` names your workspaces after tasks/Jira issues, it helps to see
-those names in GNOME's workspace switcher popup. Install the
-[**Workspace Switcher Manager**](https://extensions.gnome.org/extension/4788/workspace-switcher-manager/)
-extension (`workspace-switcher-manager@G-dH.github.com`), then configure it
-to display the workspace name (it shows only the index/app name by default):
+Since GNOME Shell doesn't expose the active workspace over D-Bus by
+default, this repo ships a companion extension,
+[`gnome-extension/et@seb4stien.github.com`](gnome-extension/et@seb4stien.github.com),
+that reports it directly. It also owns the per-workspace counters: when an
+`et`-managed `dynamic` workspace is active, its counter runs automatically;
+switching away or locking the session pauses it, and returning or
+unlocking resumes it. Ordinary keyboard/mouse inactivity still counts. See
+[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for how the extension and
+its display preferences work internally.
 
-```bash
-S=org.gnome.shell.extensions.workspace-switcher-manager
-gsettings set $S active-show-ws-name true       # show the name on the active workspace
-gsettings set $S inactive-show-ws-name true     # ...and on the others
-gsettings set $S active-show-app-name false     # drop the focused-app name
-gsettings set $S inactive-show-app-name false
-gsettings set $S popup-width-scale 200          # widen the popup so names fit
-```
-
-The workspace index stays visible (`active-show-ws-index`, on by default).
-The rest is personal taste — you can also tweak the popup position
-(`horizontal`/`vertical`), corner radius (`popup-radius-scale`), on-screen
-time (`on-screen-time`), and font size (`font-scale`) from the extension's
-preferences.
-
-## Installation
-
-This project uses [uv](https://docs.astral.sh/uv/):
+Install and enable it with:
 
 ```bash
-uv sync            # create the virtualenv and install et + dependencies
-uv run et --help   # run without installing globally
+scripts/install-gnome-shell-extension.sh
 ```
 
-To install the `et` entry point onto your `PATH`:
+`gnome-extensions enable` may report the extension "does not exist" the
+first time it's installed — this is expected, since GNOME Shell only scans
+`~/.local/share/gnome-shell/extensions` for new UUIDs at startup; the script
+detects this, registers it as enabled directly via `gsettings`, and checks
+the running Shell over D-Bus to tell you whether it has no record of the
+extension yet (needs a full restart) or already scanned it but hit an
+error. Either way, log out and back in afterwards so GNOME Shell picks it
+up.
+
+Open its preferences with:
 
 ```bash
-uv tool install .
+gnome-extensions prefs et@seb4stien.github.com
 ```
 
-## Usage
+## CLI features
 
-```bash
-et --help
-```
-
-Run bare (no subcommand), or `et info` explicitly, from a non-`static`
-workspace to see its linked Jira issue and tracked time at a glance:
-
-```bash
-et         # same output as `et jira log-time` would act on, without logging anything
-et info    # explicit, named equivalent of the above
-```
-
-From a `static` workspace, or one that isn't part of the managed pool,
-both fall back to the usual help text.
-
-### Workspaces
+### Workspaces features
 
 ```bash
 et ws rename focus          # rename the active workspace to "focus"
 et ws rename --all          # rename workspaces 0..n-1 from the config's "workspaces" list
 et ws delete                # delete the active workspace, shifting later ones left
-et ws delete --force        # same, even if still linked to a Jira issue (tracker is lost)
+et ws delete --force        # same, even if still linked to a Jira issue (counter is lost)
 ```
 
-`et ws delete` frees a workspace slot. It only works on a
-"free" workspace — not `static`, and not linked to a Jira issue (run `et
-jira complete` first if it still is). Every non-`static` workspace after the
-deleted one (and its Tracker timer) shifts one slot to the left to close the
-gap, then the now-empty trailing slot is reclaimed by decrementing GNOME's
-workspace count (`num-workspaces`). The exception is when the
-highest-numbered workspace is `static` — shrinking would swallow it, so the
-count is left unchanged and the freed slot just becomes a bare `ET-<n>`.
-Refuses to delete the last remaining workspace. `--force` bypasses the
-Jira-linked check for assigned/in-progress workspaces — its Tracker timer is
-discarded rather than logged, so log the time first if you need it (`--force`
-never bypasses the `static` check).
-
-### Tasks
-
-`et jira` wraps the workspace/Tracker/Jira integrations into a single
-lifecycle for one task at a time — it doesn't replace `ws`, which keeps
-working exactly as before.
+### Jira features
 
 ```bash
 et info                                      # (or bare `et`) show the active task's Jira issue and time spent
 et jira start                                # pick an active Jira issue and start a task from it
-et jira start -k ISD-123                     # start a task for a specific issue key directly
+et jira start ISD-123                        # start a task for a specific issue key directly
 et jira create                               # interactively create a new Jira issue
+et jira create <GITHUB_URL>                  # pre-fill from a GitHub issue/PR
 et jira log-time                             # log the active workspace's tracked time to Jira
 et jira log-time 2h                          # log a manually-specified 2h duration instead
 et jira log-time --all                       # log every workspace with a linked Jira issue, not just the active one
@@ -140,121 +164,10 @@ et jira comment "Looks good"                 # add a comment to the linked Jira 
 et jira status in-progress                   # move the linked issue to "In Progress"
 et jira status                               # show current status, pick a new one from a numbered list
 et jira complete                             # log time, then optionally delete the workspace and close the issue
+et jira log-time -j ISD-123                  # act on a specific issue instead of the active workspace's one
 ```
 
-`et` with no subcommand shows the same Jira issue details as before, plus
-the elapsed time of the `ET-<n>` Tracker timer bound to the active
-workspace (e.g. `Time spent: 1h 12m 0s`, with `(running)` appended if the
-timer is currently running) — but only when the active workspace is part
-of the managed (non-`static`) pool; otherwise it shows this help text.
-
-`et jira start` allocates the first free (non-`static`, unlinked) workspace
-slot from the fixed pool of GNOME workspaces. If every workspace is already
-taken, it asks whether to add one more (bumping GNOME's `num-workspaces` by
-one) — decline and the command cancels without changing anything. It then
-creates the slot's `ET-<n>` Tracker timer, and
-switches GNOME to it, best-effort moving the terminal window it was run
-from along with it (via `wmctrl -r :ACTIVE:`) so it doesn't get left
-behind on the old workspace. That last step needs an addressable X11
-window, which native Wayland clients (e.g. many terminal emulators under
-GNOME/Wayland) don't have; when it's unsupported, `et jira start` prints
-a note but still succeeds. It lists your active Jira issues that aren't
-already linked to a workspace, lets you pick one, and links the new
-workspace to it. If the selected issue isn't already "In Progress", it
-asks whether to
-move it there (showing its current status) and does so via Jira's
-transitions API if you confirm.
-
-`et jira start -k KEY` (or `--key KEY`) starts a task for a specific Jira
-issue directly instead of picking one from the active-issues list — it
-fails if `KEY` is already linked to an existing workspace. It follows the
-same steps as above (offering to move the issue to "In Progress" if
-needed), plus one more: if the issue isn't already in one of its
-project's current active sprints, it asks whether to add it to one (using
-the same Agile board auto-discovery/caching as `et jira create --sprint`,
-and requiring `jira.project_key` to be set) — if the board has more than
-one concurrently active sprint, it prompts you to pick which one; if no
-board or active sprint can be resolved, it prints a warning and continues
-without touching the sprint rather than failing the command.
-
-`et jira create [GITHUB_URL]` interactively creates a new Jira issue in
-`jira.project_key` (required in config for this command). It prompts for:
-the issue type (`Bug`/`Story`/`Task`, default `Story` — defaulting to `Bug`
-when `GITHUB_URL` points at a GitHub issue labeled "bug"); the summary
-(pre-filled from the GitHub issue/PR title when a URL is given); whether to
-assign the issue to yourself (default yes, via your `jira.email`); priority
-(`Highest`/`High`/`Medium`/`Low`/`Lowest`, default `Medium`); a component
-picked from the project's component list; whether to add the issue to the
-project's current sprint (default yes — the Agile board is auto-discovered
-on first use and its id saved to `jira.board_id` so later runs skip that
-lookup; if the board has more than one concurrently active sprint, you're
-prompted to pick which one); an estimate in hours (written to the issue's
-time-tracking original estimate); and an optional description (pre-filled
-from the GitHub issue/PR body when a URL is given, with the URL itself
-always appended as a reference). When `GITHUB_URL` is given, it's also
-written to the issue's "Bug link" field, if that custom field exists on
-the Jira instance (looked up by name, like the Sprint field — skipped with a
-warning otherwise). `GITHUB_URL` accepts
-`https://github.com/<owner>/<repo>/issues/<n>` and
-`https://github.com/<owner>/<repo>/pull/<n>` links, fetched via the `gh`
-CLI (which must be installed and authenticated) — if the URL can't be
-parsed or fetched, `et jira create` warns and falls back to blank
-defaults rather than failing outright.
-
-`et jira log-time` reads the elapsed time from the `ET-<n>` Tracker timer
-bound to the active workspace, resolves the Jira issue linked to that
-workspace (its `ref`, e.g. set by `et jira start`), and logs it as a
-worklog via Jira's own worklog API (no separate Tempo credential needed —
-worklogs created this way still show up in Tempo timesheets when Tempo is
-configured to sync native Jira worklogs). At least a minute of elapsed time
-is required. On success the tracker is reset to 0, unless `--no-reset` is
-given. Given an `Xh` duration instead (e.g. `et jira log-time 2h` or `et
-jira log-time 1.5h`), that duration is logged manually rather than the
-Tracker timer's elapsed time — the Tracker timer isn't read or reset in
-that case (so `--no-reset` doesn't apply).
-
-`et jira log-time --all` logs every workspace in the `workspaces` config
-list that has a linked Jira issue, instead of only the active one —
-useful for logging a whole day's tracked time across every task at once
-without switching between workspaces. Each linked workspace's own Tracker
-timer is logged to its own issue and reset immediately on success (or left
-untouched otherwise); a workspace with less than a minute of elapsed time,
-no Tracker timer at all, or a failing Jira call is skipped (reported at the
-end) rather than stopping the rest from being logged. `--no-reset` still
-applies (to every workspace logged in that run), but `--all` can't be
-combined with an `Xh` duration, `--comment/-m`, or `-j/--jira`, since those
-only make sense for a single workspace/issue.
-
-`et jira comment [MESSAGE]` adds a comment to the Jira issue linked to the
-active workspace (or a different issue via `-j/--jira KEY`). Prompts for
-the message if not given as an argument.
-
-`et jira status [in-progress|blocked]` moves the linked issue directly to
-"In Progress" or "Blocked" (applied immediately, no confirmation). With no
-argument, it shows the linked issue's current status and a numbered list of
-the team's workflow statuses (`Untriaged`, `Triaged`, `In Progress`,
-`Blocked`, `In Review`, `To Be Deployed`, `Done`, `Rejected`) to pick a new
-one from interactively; leave the prompt blank to cancel.
-
-`et jira log-time`, `et jira complete`, `et jira comment`, and `et jira
-status` all accept a `-j`/`--jira KEY` option to act on a specific Jira
-issue instead of the one linked to the active workspace — e.g. `et jira
-comment "Looks good" -j ISD-123` or `et jira status blocked --jira
-ISD-123`. For `comment` and `status`, this also skips workspace resolution
-entirely, so those two work even outside a managed workspace.
-
-`et jira complete` logs the active workspace's tracked time to Jira (like
-`et jira log-time`) and tells you how much it logged. It then asks whether
-to delete the workspace and whether to move the linked Jira issue to
-"Done" — each behind its own confirmation prompt, so both actions are
-skipped unless you confirm them. When you confirm the delete, the workspace
-is removed exactly like `et ws delete` — GNOME's workspace count is
-decremented to reclaim the slot and every non-`static` workspace after it is
-shifted one slot to the left (its Tracker timer follows it), so no gap is
-left in the middle of your workspaces. If only a single workspace remains
-(GNOME can't drop below one), its slot is reset to a bare `ET-<n>` instead.
-
-### Git
+### Git features
 
 ```bash
 et git create-branch                         # branch off the active workspace's linked issue
@@ -262,36 +175,15 @@ et git cb                                     # alias for the above
 et git create-branch -j ISD-1234              # branch off a specific issue instead
 ```
 
-`et git create-branch` (aliased `et git cb`) creates a git branch for the
-current task's Jira issue, following Canonical's
-[PR branch naming convention](https://github.com/canonical/platform-engineering-docs/blob/main/docs/delivery-workflows/github/pull-requests/index.rst):
-`type/scope-short-description-jirakey` (e.g.
-`feat/tcp-wildcard-sni-support-isd-1234`). It defaults to the Jira issue
-linked to the active workspace; pass `-j`/`--jira KEY` to target a
-different issue instead (works outside a managed workspace too, like the
-`et jira` commands' own `-j`/`--jira`).
-
-It first prints the issue's clickable link and summary, then:
-
-- Proposes a **branch type** (one of `feat`/`fix`/`docs`/`chore`/`test`/`ci`)
-  computed from the issue: `Bug` → `fix`, `Story` → `feat`, `Task` →
-  `chore`; a `documentation` label always wins and defaults to `docs`
-  regardless of issue type. Prompts to accept the default or pick a
-  different one from the list — this becomes the branch's `type/` prefix,
-  which can't otherwise be typed in freely.
-- Proposes the `scope-short-description` segment as a slug of the issue
-  summary, editable at the prompt.
-- Appends the resolved Jira key (lowercased) as the branch's trailing
-  identifier — always the actual issue key, not editable.
-
-Fails with a clear error if not run inside a git repository, or if a local
-branch with the computed name already exists. On success, creates the
-branch from the current `HEAD` and switches to it (`git checkout -b`).
+Follows Canonical's
+[PR branch naming convention](https://github.com/canonical/platform-engineering-docs/blob/main/docs/delivery-workflows/github/pull-requests/index.rst)
+(`type/scope-short-description-jirakey`), proposing a branch type and
+description slug from the issue that you can accept or edit. Run
+`et git create-branch --help` for details.
 
 ## Configuration
 
-`et` reads `~/.config/et/config.yaml` (override the directory with the
-`ET_CONFIG_DIR` environment variable). Example:
+`et` reads `~/.config/et/config.yaml`.
 
 ```yaml
 # Jira Cloud REST credentials + query. Required for `et jira start`
@@ -326,7 +218,7 @@ with mode `0600` because it may contain a Jira API token.
 
 The `jql` value is a plain YAML scalar, so quoting it is optional — quote
 it only if it starts with a character YAML reserves (`{`, `[`, `*`, `&`,
-`!`, `%`, `@`) or contains ` #` or `: `.
+`!`, `%`, `@`) or contains `#` or `:`.
 
 When `et jira start` reports no issues but the same JQL finds some in the
 Jira web UI, run `et --debug jira start`: it logs each search request (URL,
@@ -349,27 +241,15 @@ against `/rest/api/3/myself` whenever a search comes back empty.
 > gsettings set org.gnome.desktop.wm.preferences num-workspaces <N>
 > ```
 
-> **Known limitation:** `et jira start` applies its changes (Tracker
-> timers, then config, then GNOME workspace names) sequentially without a
-> rollback. A failure partway through can leave the config and live GNOME
-> state temporarily out of sync; re-running the command reconciles them.
-
-
-## Development
-
-Common tasks are exposed through a [`Justfile`](./Justfile):
-
-```bash
-just install-requirements   # uv sync + install pre-commit hooks
-just lint                   # ruff
-just static                 # mypy --strict
-just test                   # pytest + coverage
-just test-integ             # end-to-end integration tests
-just ops                    # build the distribution artifacts
-```
-
-`prek` (pre-commit) runs ruff, mypy, and pytest on every commit.
+> **Known limitation:** `et jira start` applies its changes sequentially
+> without a rollback, which can briefly leave config and live GNOME state
+> out of sync on failure — see
+> [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md#known-limitations) for
+> details.
 
 ## License
 
-Licensed under the [Apache License 2.0](./LICENSE).
+The Python project is licensed under the [Apache License 2.0](./LICENSE).
+The GNOME Shell extension is licensed separately under
+[GPL-3.0-or-later](./gnome-extension/et@seb4stien.github.com/LICENSE), as
+required for GNOME Shell extensions.

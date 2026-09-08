@@ -1,5 +1,5 @@
 """Tests for the `et` CLI, focused on presentation behaviour not covered by unit tests
-of the underlying config/tracker/workspace/jira modules."""
+of the underlying config/et_extension/workspace/jira modules."""
 
 from __future__ import annotations
 
@@ -11,11 +11,15 @@ import typer
 from typer.testing import CliRunner
 
 from et.cli import _hyperlink, app
-from et.config import EtConfig, JiraConfig, WorkspaceConfigEntry
+from et.config import ConfigError, EtConfig, JiraConfig, WorkspaceConfigEntry
+from et.et_extension import (
+    EtExtensionError,
+    WorkspaceCounter,
+    WorkspaceCounterNotFoundError,
+)
 from et.jira import JiraIssue, JiraSprint
 from et.jira_time import AllLogTimeResult, JiraLogTimeError, LogTimeResult, SkippedWorkspace
 from et.task import TaskCompleteResult, TaskCreateResult, TaskError
-from et.tracker import TrackerError
 from et.workspaces import WorkspaceError
 
 runner = CliRunner()
@@ -56,11 +60,11 @@ def _config(workspaces: list[WorkspaceConfigEntry] | None = None) -> EtConfig:
     )
 
 
-@patch("et.cli.load_timers")
+@patch("et.cli.get_workspace_counter")
 @patch("et.cli.get_active_workspace_index")
 @patch("et.cli.load_config")
 def test_bare_invocation_shows_jira_info_and_time_spent_for_non_static_workspace(
-    mock_load_config, mock_index, mock_load_timers
+    mock_load_config, mock_index, mock_get_counter
 ):
     mock_index.return_value = 1
     mock_load_config.return_value = _config(
@@ -73,7 +77,7 @@ def test_bare_invocation_shows_jira_info_and_time_spent_for_non_static_workspace
             ),
         ]
     )
-    mock_load_timers.return_value = []
+    mock_get_counter.return_value = WorkspaceCounter(0, False)
 
     with patch("sys.stdout.isatty", return_value=False):
         result = runner.invoke(app, [])
@@ -83,15 +87,15 @@ def test_bare_invocation_shows_jira_info_and_time_spent_for_non_static_workspace
     assert "Fix login timeout on mobile clients" in result.stdout
     assert "jira:PROJ-1" in result.stdout
     assert "https://example.atlassian.net/browse/PROJ-1" not in result.stdout  # only in tty link
-    assert "No tracker for this workspace." in result.stdout
+    assert "Time spent: 0h 0m 0s" in result.stdout
 
 
 @patch("et.cli._hyperlink", side_effect=lambda text, url: f"<{url}|{text}>")
-@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_counter", return_value=WorkspaceCounter(0, False))
 @patch("et.cli.get_active_workspace_index")
 @patch("et.cli.load_config")
 def test_bare_invocation_uses_hyperlink_helper_with_jira_browse_url(
-    mock_load_config, mock_index, _mock_load_timers, mock_hyperlink
+    mock_load_config, mock_index, _mock_get_counter, mock_hyperlink
 ):
     mock_index.return_value = 0
     mock_load_config.return_value = _config(
@@ -112,11 +116,11 @@ def test_bare_invocation_uses_hyperlink_helper_with_jira_browse_url(
     assert "<https://example.atlassian.net/browse/PROJ-1|jira:PROJ-1>" in result.stdout
 
 
-@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_counter", return_value=WorkspaceCounter(0, False))
 @patch("et.cli.get_active_workspace_index")
 @patch("et.cli.load_config")
 def test_bare_invocation_reports_no_jira_issue_when_workspace_has_no_ref(
-    mock_load_config, mock_index, _mock_load_timers
+    mock_load_config, mock_index, _mock_get_counter
 ):
     mock_index.return_value = 0
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="misc")])
@@ -125,6 +129,24 @@ def test_bare_invocation_reports_no_jira_issue_when_workspace_has_no_ref(
 
     assert result.exit_code == 0
     assert "No Jira issue linked to this workspace." in result.stdout
+
+
+@patch(
+    "et.cli.get_workspace_counter",
+    side_effect=WorkspaceCounterNotFoundError("not prepared"),
+)
+@patch("et.cli.get_active_workspace_index", return_value=0)
+@patch("et.cli.load_config")
+def test_bare_invocation_allows_free_workspace_without_counter(
+    mock_load_config, _mock_index, _mock_get_counter
+):
+    mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ET-1")])
+
+    result = runner.invoke(app, [])
+
+    assert result.exit_code == 0
+    assert "No Jira issue linked to this workspace." in result.stdout
+    assert "No counter for this workspace." in result.stdout
 
 
 @patch("et.cli.get_active_workspace_index")
@@ -165,24 +187,24 @@ def test_bare_invocation_shows_help_when_active_workspace_lookup_fails(mock_inde
     assert "Interact with GNOME/Ubuntu workspaces." in result.stdout
 
 
-@patch("et.cli.load_timers", side_effect=TrackerError("no schema"))
+@patch("et.cli.get_workspace_counter", side_effect=EtExtensionError("extension down"))
 @patch("et.cli.get_active_workspace_index")
 @patch("et.cli.load_config")
-def test_bare_invocation_reports_tracker_error(mock_load_config, mock_index, _mock_load_timers):
+def test_bare_invocation_reports_extension_error(mock_load_config, mock_index, _mock_get_counter):
     mock_index.return_value = 0
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="misc")])
 
     result = runner.invoke(app, [])
 
     assert result.exit_code == 1
-    assert "Error: no schema" in result.output
+    assert "Error: extension down" in result.output
 
 
-@patch("et.cli.load_timers", return_value=[])
+@patch("et.cli.get_workspace_counter", return_value=WorkspaceCounter(0, False))
 @patch("et.cli.get_active_workspace_index")
 @patch("et.cli.load_config")
 def test_info_command_shows_jira_info_and_time_spent_for_non_static_workspace(
-    mock_load_config, mock_index, _mock_load_timers
+    mock_load_config, mock_index, _mock_get_counter
 ):
     mock_index.return_value = 0
     mock_load_config.return_value = _config(
@@ -214,6 +236,81 @@ def test_info_command_shows_full_app_help_when_workspace_is_static(mock_load_con
     assert result.exit_code == 0
     # Falls back to the top-level app help, not just the `info` subcommand's own usage.
     assert "Interact with GNOME/Ubuntu workspaces." in result.stdout
+
+
+def test_config_command_is_registered():
+    result = runner.invoke(app, ["config", "--help"])
+
+    assert result.exit_code == 0
+    assert "config.yaml" in result.stdout
+
+
+@patch("et.cli.save_config")
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("config file not found: ..."))
+def test_config_command_writes_result_when_confirmed(mock_load_config, mock_wizard, mock_save):
+    mock_wizard.return_value = _config()
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert "Wrote" in result.stdout
+    mock_wizard.assert_called_once()
+    # `existing` is `None` since the config file doesn't exist yet.
+    assert mock_wizard.call_args.args[1] is None
+    mock_save.assert_called_once_with(_config())
+
+
+@patch("et.cli.save_config")
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config")
+def test_config_command_passes_existing_config_to_wizard(mock_load_config, mock_wizard, mock_save):
+    existing = _config([WorkspaceConfigEntry(name="mails")])
+    mock_load_config.return_value = existing
+    mock_wizard.return_value = existing
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert mock_wizard.call_args.args[1] is existing
+    mock_save.assert_called_once_with(existing)
+
+
+@patch("et.cli.save_config")
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("config file not found: ..."))
+def test_config_command_reports_cancellation_without_saving(
+    mock_load_config, mock_wizard, mock_save
+):
+    mock_wizard.return_value = None
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert "Cancelled." in result.stdout
+    mock_save.assert_not_called()
+
+
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("could not parse config file ..."))
+def test_config_command_reports_load_config_error(mock_load_config, mock_wizard):
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 1
+    assert "Error: could not parse config file" in result.output
+    mock_wizard.assert_not_called()
+
+
+@patch("et.cli.save_config", side_effect=ConfigError("could not write config file ..."))
+@patch("et.cli.run_config_wizard")
+@patch("et.cli.load_config", side_effect=ConfigError("config file not found: ..."))
+def test_config_command_reports_save_config_error(mock_load_config, mock_wizard, mock_save):
+    mock_wizard.return_value = _config()
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 1
+    assert "Error: could not write config file" in result.output
 
 
 @patch("et.cli.delete_active_workspace")
@@ -265,10 +362,9 @@ def _organize_config():
     )
 
 
-@patch("et.cli.load_timers", return_value=[])
 @patch("et.cli.get_workspace_count", return_value=1)
 @patch("et.cli.load_config")
-def test_ws_organize_reports_nothing_to_organize(mock_load_config, _mock_count, _mock_timers):
+def test_ws_organize_reports_nothing_to_organize(mock_load_config, _mock_count):
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-A")])
 
     result = runner.invoke(app, ["ws", "organize"])
@@ -277,11 +373,13 @@ def test_ws_organize_reports_nothing_to_organize(mock_load_config, _mock_count, 
     assert "Nothing to organize" in result.stdout
 
 
+@patch("et.ws.et_extension.get_workspace_counter", return_value=WorkspaceCounter(0, False))
 @patch("et.cli.open_in_editor")
-@patch("et.cli.load_timers", return_value=[])
 @patch("et.cli.get_workspace_count", return_value=2)
 @patch("et.cli.load_config")
-def test_ws_organize_reports_no_changes(mock_load_config, _mock_count, _mock_timers, mock_editor):
+def test_ws_organize_reports_no_changes(
+    mock_load_config, _mock_count, mock_editor, _mock_counter
+):
     mock_load_config.return_value = _organize_config()
     mock_editor.return_value = "1\n2\n"
 
@@ -291,13 +389,13 @@ def test_ws_organize_reports_no_changes(mock_load_config, _mock_count, _mock_tim
     assert "No changes." in result.stdout
 
 
+@patch("et.ws.et_extension.get_workspace_counter", return_value=WorkspaceCounter(0, False))
 @patch("et.cli.apply_organize_plan")
 @patch("et.cli.open_in_editor")
-@patch("et.cli.load_timers", return_value=[])
 @patch("et.cli.get_workspace_count", return_value=2)
 @patch("et.cli.load_config")
 def test_ws_organize_shows_summary_and_aborts_on_decline(
-    mock_load_config, _mock_count, _mock_timers, mock_editor, mock_apply
+    mock_load_config, _mock_count, mock_editor, mock_apply, _mock_counter
 ):
     mock_load_config.return_value = _organize_config()
     mock_editor.return_value = "2\n1\n"
@@ -312,13 +410,41 @@ def test_ws_organize_shows_summary_and_aborts_on_decline(
     mock_apply.assert_not_called()
 
 
+@patch(
+    "et.ws.et_extension.get_workspace_counter",
+    side_effect=[
+        WorkspaceCounter(120, False),
+        WorkspaceCounterNotFoundError("not prepared"),
+    ],
+)
+@patch("et.cli.apply_organize_plan")
+@patch("et.cli.open_in_editor", return_value="2\n1\n")
+@patch("et.cli.get_workspace_count", return_value=2)
+@patch("et.cli.load_config")
+def test_ws_organize_allows_free_workspace_without_counter(
+    mock_load_config, _mock_count, _mock_editor, mock_apply, _mock_counter
+):
+    mock_load_config.return_value = _config(
+        [
+            WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A"),
+            WorkspaceConfigEntry(name="ET-2"),
+        ]
+    )
+
+    result = runner.invoke(app, ["ws", "organize"], input="n\n")
+
+    assert result.exit_code == 0
+    assert "no counter" in result.stdout
+    mock_apply.assert_not_called()
+
+
+@patch("et.ws.et_extension.get_workspace_counter", return_value=WorkspaceCounter(0, False))
 @patch("et.cli.apply_organize_plan")
 @patch("et.cli.open_in_editor")
-@patch("et.cli.load_timers", return_value=[])
 @patch("et.cli.get_workspace_count", return_value=2)
 @patch("et.cli.load_config")
 def test_ws_organize_applies_on_confirm(
-    mock_load_config, _mock_count, _mock_timers, mock_editor, mock_apply
+    mock_load_config, _mock_count, mock_editor, mock_apply, _mock_counter
 ):
     mock_load_config.return_value = _organize_config()
     mock_editor.return_value = "2\n1\n"
@@ -328,18 +454,18 @@ def test_ws_organize_applies_on_confirm(
     assert result.exit_code == 0
     assert "Reorganized 2 workspaces." in result.stdout
     mock_apply.assert_called_once()
-    plan = mock_apply.call_args[0][3]
+    plan = mock_apply.call_args[0][2]
     by_new_slot = {row.new_slot: row for row in plan}
     assert by_new_slot[0].entry.name == "ISD-B"
     assert by_new_slot[1].entry.name == "ISD-A"
 
 
+@patch("et.ws.et_extension.get_workspace_counter", return_value=WorkspaceCounter(0, False))
 @patch("et.cli.open_in_editor")
-@patch("et.cli.load_timers", return_value=[])
 @patch("et.cli.get_workspace_count", return_value=2)
 @patch("et.cli.load_config")
 def test_ws_organize_reports_invalid_editor_result(
-    mock_load_config, _mock_count, _mock_timers, mock_editor
+    mock_load_config, _mock_count, mock_editor, _mock_counter
 ):
     mock_load_config.return_value = _organize_config()
     mock_editor.return_value = "1\n1\n"
@@ -348,6 +474,20 @@ def test_ws_organize_reports_invalid_editor_result(
 
     assert result.exit_code == 1
     assert "Error:" in result.output
+
+
+@patch("et.ws.et_extension.get_workspace_counter", side_effect=EtExtensionError("extension down"))
+@patch("et.cli.get_workspace_count", return_value=2)
+@patch("et.cli.load_config")
+def test_ws_organize_reports_extension_error_from_list_candidates(
+    mock_load_config, _mock_count, _mock_counter
+):
+    mock_load_config.return_value = _organize_config()
+
+    result = runner.invoke(app, ["ws", "organize"])
+
+    assert result.exit_code == 1
+    assert "Error: extension down" in result.output
 
 
 # --- static-workspace startup check ------------------------------------------
@@ -385,7 +525,7 @@ def test_root_exits_when_static_check_fails(_mock_dynamic):
 @patch("et.cli.create_task_from_jira")
 def test_jira_start_lists_issues_and_creates_from_selection(mock_create_from_jira):
     mock_create_from_jira.return_value = TaskCreateResult(
-        workspace_index=2, name="ISD-2", ref="jira:ISD-2", timer_created=True, window_moved=True
+        workspace_index=2, name="ISD-2", ref="jira:ISD-2", window_moved=True
     )
 
     def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
@@ -406,13 +546,12 @@ def test_jira_start_lists_issues_and_creates_from_selection(mock_create_from_jir
     assert "Active issues not yet linked to a workspace:" in result.stdout
     assert "ISD-2" in result.stdout
     assert "Created workspace 3: 'ISD-2' (linked to ISD-2)" in result.stdout
-    assert "Note: could not move this terminal window" not in result.stdout
 
 
 @patch("et.cli.create_task_from_jira")
 def test_jira_start_notes_when_window_could_not_be_moved(mock_create_from_jira):
     mock_create_from_jira.return_value = TaskCreateResult(
-        workspace_index=2, name="ISD-2", ref="jira:ISD-2", timer_created=True, window_moved=False
+        workspace_index=2, name="ISD-2", ref="jira:ISD-2", window_moved=False
     )
 
     def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
@@ -430,7 +569,6 @@ def test_jira_start_notes_when_window_could_not_be_moved(mock_create_from_jira):
     result = runner.invoke(app, ["jira", "start"], input="1\n")
 
     assert result.exit_code == 0
-    assert "Note: could not move this terminal window to the new workspace" in result.stdout
 
 
 @patch("et.cli.create_task_from_jira")
@@ -533,10 +671,10 @@ def test_jira_start_defaults_grow_prompt_to_yes(mock_create_from_jira):
 @patch("et.cli.create_task_from_jira_key")
 def test_jira_start_with_key_creates_task_directly(mock_create_from_jira_key):
     mock_create_from_jira_key.return_value = TaskCreateResult(
-        workspace_index=2, name="ISD-2", ref="jira:ISD-2", timer_created=True, window_moved=True
+        workspace_index=2, name="ISD-2", ref="jira:ISD-2", window_moved=True
     )
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"])
+    result = runner.invoke(app, ["jira", "start", "ISD-2"])
 
     assert result.exit_code == 0
     assert "Created workspace 3: 'ISD-2' (linked to ISD-2)" in result.stdout
@@ -548,7 +686,7 @@ def test_jira_start_with_key_creates_task_directly(mock_create_from_jira_key):
 def test_jira_start_with_key_reports_error(mock_create_from_jira_key):
     mock_create_from_jira_key.side_effect = TaskError("ISD-2 is already linked to workspace 1")
 
-    result = runner.invoke(app, ["jira", "start", "--key", "ISD-2"])
+    result = runner.invoke(app, ["jira", "start", "ISD-2"])
 
     assert result.exit_code == 1
     assert "Error: ISD-2 is already linked to workspace 1" in result.output
@@ -569,13 +707,13 @@ def test_jira_start_with_key_prompts_to_move_issue_to_in_progress_when_confirmed
         issue = JiraIssue(key=issue_key, summary="Second issue", priority="High", status="To Do")
         captured["confirmed"] = confirm_transition(issue)
         return TaskCreateResult(
-            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2",
             window_moved=True,
         )
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="y\n")
+    result = runner.invoke(app, ["jira", "start", "ISD-2"], input="y\n")
 
     assert result.exit_code == 0
     assert "ISD-2 is currently 'To Do'. Move it to 'In Progress'?" in result.stdout
@@ -594,13 +732,13 @@ def test_jira_start_with_key_prompts_to_add_to_sprint(mock_create_from_jira_key)
         del warn
         captured["selected"] = select_sprint([JiraSprint(id="7", name="Sprint 7")])
         return TaskCreateResult(
-            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2",
             window_moved=True,
         )
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="y\n")
+    result = runner.invoke(app, ["jira", "start", "ISD-2"], input="y\n")
 
     assert result.exit_code == 0
     assert "ISD-2 isn't in the current sprint 'Sprint 7'. Add it?" in result.stdout
@@ -623,13 +761,13 @@ def test_jira_start_with_key_prompts_to_choose_among_multiple_active_sprints(
             [JiraSprint(id="7", name="Sprint 7"), JiraSprint(id="8", name="Sprint 8")]
         )
         return TaskCreateResult(
-            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2",
             window_moved=True,
         )
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"], input="2\n")
+    result = runner.invoke(app, ["jira", "start", "ISD-2"], input="2\n")
 
     assert result.exit_code == 0
     assert "ISD-2 isn't in any of the project's active sprints:" in result.stdout
@@ -647,13 +785,13 @@ def test_jira_start_with_key_prints_warnings(mock_create_from_jira_key):
         del confirm_grow
         warn("no active sprint found on the project's board; skipping sprint")
         return TaskCreateResult(
-            workspace_index=0, name="ISD-2", ref="jira:ISD-2", timer_created=True,
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2",
             window_moved=True,
         )
 
     mock_create_from_jira_key.side_effect = fake_create_from_jira_key
 
-    result = runner.invoke(app, ["jira", "start", "-k", "ISD-2"])
+    result = runner.invoke(app, ["jira", "start", "ISD-2"])
 
     assert result.exit_code == 0
     assert "Warning: no active sprint found" in result.output
@@ -664,7 +802,7 @@ def test_jira_start_with_key_prints_warnings(mock_create_from_jira_key):
 @patch("et.cli.log_time_for_current_workspace")
 def test_jira_log_time_logs_and_reports_duration(mock_log_time, mock_load_config, mock_hyperlink):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=1, issue_key="ISD-321", seconds_logged=4320, tracker_reset=True
+        workspace_index=1, issue_key="ISD-321", seconds_logged=4320, counter_reset=True
     )
     mock_load_config.return_value = _config([])
 
@@ -681,12 +819,35 @@ def test_jira_log_time_logs_and_reports_duration(mock_log_time, mock_load_config
 
 
 @patch("et.cli.load_config")
+@patch("et.cli.log_time_for_current_workspace")
+def test_jira_log_time_warns_when_worklog_succeeds_but_reset_fails(
+    mock_log_time, mock_load_config
+):
+    mock_log_time.return_value = LogTimeResult(
+        workspace_index=1,
+        issue_key="ISD-321",
+        seconds_logged=4320,
+        counter_reset=False,
+        counter_reset_error="extension unavailable",
+    )
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "log-time"])
+
+    assert result.exit_code == 0
+    assert "Jira accepted the worklog" in result.output
+    assert "Do not log it again" in result.output
+    assert "ResetWorkspaceCounter uint32 1" in result.output
+
+
+@patch("et.cli.load_config")
 @patch("et.cli.log_manual_time_for_current_workspace")
 def test_jira_log_time_with_hours_argument_logs_manual_duration(
     mock_log_manual, mock_load_config
 ):
     mock_log_manual.return_value = LogTimeResult(
-        workspace_index=1, issue_key="ISD-321", seconds_logged=7200, tracker_reset=False
+        workspace_index=1, issue_key="ISD-321", seconds_logged=7200, counter_reset=False
     )
     mock_load_config.return_value = _config([])
 
@@ -695,7 +856,7 @@ def test_jira_log_time_with_hours_argument_logs_manual_duration(
 
     assert result.exit_code == 0
     assert "Logged 2h 0m 0s to jira:ISD-321 (workspace 2)" in result.stdout
-    assert "Reset tracker to 0" not in result.stdout
+    assert "Reset counter to 0" not in result.stdout
     mock_log_manual.assert_called_once_with(7200, description="manual", issue_key=None)
 
 
@@ -710,7 +871,7 @@ def test_jira_log_time_with_invalid_hours_argument_reports_error():
 @patch("et.cli.log_manual_time_for_current_workspace")
 def test_jira_log_time_forwards_jira_option(mock_log_manual, mock_load_config):
     mock_log_manual.return_value = LogTimeResult(
-        workspace_index=1, issue_key="ISD-999", seconds_logged=7200, tracker_reset=False
+        workspace_index=1, issue_key="ISD-999", seconds_logged=7200, counter_reset=False
     )
     mock_load_config.return_value = _config([])
 
@@ -751,7 +912,7 @@ def test_jira_log_time_all_reports_logged_and_skipped_workspaces(
                 workspace_index=0,
                 issue_key="ISD-321",
                 seconds_logged=3600,
-                tracker_reset=True,
+                counter_reset=True,
                 summary="Epic summary",
             )
         ],
@@ -771,11 +932,38 @@ def test_jira_log_time_all_reports_logged_and_skipped_workspaces(
         "Logged 1h 0m 0s to <https://example.atlassian.net/browse/ISD-321|jira:ISD-321> "
         "'Epic summary'" in result.stdout
     )
-    assert "Reset tracker to 0" in result.stdout
+    assert "Reset counter to 0" in result.stdout
     assert (
         "Skipped workspace 3 (<https://example.atlassian.net/browse/ISD-654|jira:ISD-654>): "
         "only 10s elapsed (minimum 60s)" in result.stdout
     )
+
+
+@patch("et.cli.load_config")
+@patch("et.cli.log_time_for_all_workspaces")
+def test_jira_log_time_all_warns_for_each_failed_counter_reset(
+    mock_log_all, mock_load_config
+):
+    mock_log_all.return_value = AllLogTimeResult(
+        logged=[
+            LogTimeResult(
+                workspace_index=2,
+                issue_key="ISD-654",
+                seconds_logged=3600,
+                counter_reset=False,
+                counter_reset_error="extension unavailable",
+            )
+        ],
+        skipped=[],
+    )
+    mock_load_config.return_value = _config([])
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "log-time", "--all"])
+
+    assert result.exit_code == 0
+    assert "Jira accepted the worklog" in result.output
+    assert "ResetWorkspaceCounter uint32 2" in result.output
 
 
 @patch("et.cli.load_config")
@@ -817,7 +1005,7 @@ def test_jira_log_time_all_reports_error(mock_log_all, mock_load_config):
 def test_jira_complete_logs_time_and_frees_workspace(mock_complete):
     def fake_complete(comment, issue_key, on_logged, confirm_delete, confirm_done):
         log_result = LogTimeResult(
-            workspace_index=1, issue_key="ISD-321", seconds_logged=780, tracker_reset=True
+            workspace_index=1, issue_key="ISD-321", seconds_logged=780, counter_reset=True
         )
         on_logged(log_result)
         freed = confirm_delete(log_result)
@@ -850,7 +1038,7 @@ def test_jira_complete_uses_hyperlink_helper_for_issue_key(
 
     def fake_complete(comment, issue_key, on_logged, confirm_delete, confirm_done):
         log_result = LogTimeResult(
-            workspace_index=1, issue_key="ISD-321", seconds_logged=780, tracker_reset=True
+            workspace_index=1, issue_key="ISD-321", seconds_logged=780, counter_reset=True
         )
         on_logged(log_result)
         freed = confirm_delete(log_result)
@@ -877,7 +1065,7 @@ def test_jira_complete_uses_hyperlink_helper_for_issue_key(
 def test_jira_complete_skips_cleanup_when_declined(mock_complete):
     def fake_complete(comment, issue_key, on_logged, confirm_delete, confirm_done):
         log_result = LogTimeResult(
-            workspace_index=1, issue_key="ISD-321", seconds_logged=780, tracker_reset=True
+            workspace_index=1, issue_key="ISD-321", seconds_logged=780, counter_reset=True
         )
         on_logged(log_result)
         freed = confirm_delete(log_result)
@@ -904,6 +1092,34 @@ def test_jira_complete_reports_error(mock_complete):
 
     assert result.exit_code == 1
     assert "Error: no Jira issue linked to workspace 1" in result.output
+
+
+@patch("et.cli.complete_task_for_current_workspace")
+def test_jira_complete_warns_after_workspace_is_kept_for_failed_counter_reset(mock_complete):
+    log_result = LogTimeResult(
+        workspace_index=1,
+        issue_key="ISD-321",
+        seconds_logged=780,
+        counter_reset=False,
+        counter_reset_error="extension unavailable",
+    )
+
+    def fake_complete(comment, issue_key, on_logged, confirm_delete, confirm_done):
+        on_logged(log_result)
+        return TaskCompleteResult(
+            log_result=log_result,
+            workspace_freed=False,
+            moved_to_done=False,
+        )
+
+    mock_complete.side_effect = fake_complete
+
+    with patch("sys.stdout.isatty", return_value=False):
+        result = runner.invoke(app, ["jira", "complete"])
+
+    assert result.exit_code == 0
+    assert "Jira accepted the worklog" in result.output
+    assert "ResetWorkspaceCounter uint32 1" in result.output
 
 
 @patch("et.cli.load_config")

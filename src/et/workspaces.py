@@ -1,17 +1,21 @@
 """Logic for inspecting and renaming GNOME/Ubuntu workspaces.
 
-This module shells out to `wmctrl` (to find the active workspace) and, via
-`et.gsettings`, to `gsettings` (to read/write GNOME's workspace-names
-setting). It has no Typer/CLI dependency so it can be unit tested by mocking
-`subprocess.run`.
+This module shells out to `wmctrl` (to find the active workspace on X11) or,
+on Wayland, delegates to `et.et_extension` (the companion `et` GNOME Shell
+extension's D-Bus client), since `wmctrl` doesn't work under Wayland. It
+also uses, via `et.gsettings`, `gsettings` (to read/write GNOME's
+workspace-names/workspace-count settings). It has no Typer/CLI dependency
+so it can be unit tested by mocking `subprocess.run`.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 
-from et import gsettings
+from et import et_extension, gsettings
+from et.et_extension import EtExtensionError
 from et.gsettings import GSettingsError
 
 WORKSPACE_NAMES_SCHEMA = "org.gnome.desktop.wm.preferences"
@@ -30,8 +34,25 @@ def _require_binary(name: str) -> None:
         raise WorkspaceError(f"required command not found: {name}")
 
 
+def _is_wayland_session() -> bool:
+    """Return whether the current session is running under Wayland.
+
+    `wmctrl` only works on X11, so callers use this to decide whether to
+    fall back to the `et` GNOME Shell extension's D-Bus service instead.
+    """
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        return True
+    return bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
 def get_active_workspace_index() -> int:
     """Return the 0-based index of the currently active workspace."""
+    if _is_wayland_session():
+        try:
+            return et_extension.get_active_workspace_index()
+        except EtExtensionError as exc:
+            raise WorkspaceError(str(exc)) from exc
+
     _require_binary("wmctrl")
     result = subprocess.run(
         ["wmctrl", "-d"],

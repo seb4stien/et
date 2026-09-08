@@ -6,6 +6,57 @@ All notable changes to `et` are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- `et config`: an interactive wizard to create or update
+  `~/.config/et/config.yaml` (the `jira` block and the `workspaces` list),
+  pre-filling existing values and testing Jira credentials once entered.
+
+## [1.0.0-rc.1]
+
+Release candidate for `v1.0.0`, built from `feat/native-wayland` (PR #9).
+
+### Changed
+- **Breaking:** `et jira start` now takes the Jira issue key as a
+  positional argument (`et jira start KEY`) instead of the `-k`/`--key`
+  option; the option has been removed.
+
+### Fixed
+- Workspace creation, deletion, reset, and reordering now roll back reversible
+  config and GNOME settings changes when a later step fails, and report when
+  extension state may still be partially applied.
+- Jira worklogs that succeed before a counter-reset failure are now reported
+  as partial successes with a safe counter-only recovery command, preventing
+  accidental duplicate worklogs on retry.
+- Jira issue and transition parsing now handles malformed nested response
+  fields without leaking raw `AttributeError` exceptions.
+- Config updates are now written atomically with restrictive permissions.
+- CI now restricts token permissions and pins the third-party `setup-just`
+  action to an immutable commit.
+- `scripts/install-gnome-shell-extension.sh` now *copies* the `et` GNOME
+  Shell extension into `~/.local/share/gnome-shell/extensions/` by default
+  instead of symlinking it, so it keeps working across workspace
+  re-provisioning that happens on a timeline independent of the GNOME
+  session (previously, if the symlink's target didn't exist yet at the
+  exact moment GNOME Shell scanned extensions at startup, the extension was
+  silently skipped and never loaded until an unrelated further restart).
+  Pass `--dev`/`--symlink` to opt back into symlinking, e.g. when actively
+  editing `extension.js`. The "not yet scanned" fallback message now also
+  queries the running Shell over D-Bus to distinguish "never scanned" from
+  "scanned but errored".
+
+### Added
+- A companion `et` GNOME Shell extension
+  (`gnome-extension/et@seb4stien.github.com`, installed via
+  `scripts/install-gnome-shell-extension.sh` / `just install-requirements`)
+  exposing a D-Bus service used to detect the active workspace on Wayland
+  sessions and to own persistent per-workspace counters. Managed dynamic
+  workspaces now start and pause automatically as the active workspace
+  changes, pause while the session is locked, and resume after unlock.
+- Configurable, ticket-system-agnostic workspace labels, reference estimates,
+  and live counters in both the GNOME top panel and workspace switcher. A
+  libadwaita preferences window controls each displayed value and location;
+  only the counter is shown by default.
+- D-Bus operations for the CLI to prepare, read, reset, remove, update, and
+  atomically remap workspace counters without editing extension state directly.
 - `et jira start -k KEY` (`--key`): start a task from a specific Jira issue
   key directly, skipping the active-issues picker (failing if `KEY` is
   already linked to a workspace). Follows the same steps as the
@@ -30,12 +81,12 @@ All notable changes to `et` are documented here. Format loosely follows
   the active workspace (or a different issue via `-j`/`--jira`), prompting
   for the message if not given as an argument.
 - `et jira log-time [Xh]`: log a manually-specified duration (e.g. `2h`,
-  `1.5h`) to the linked Jira issue instead of reading the Tracker timer's
+  `1.5h`) to the linked Jira issue instead of reading the workspace counter's
   elapsed time.
 - `et jira log-time --all`: log every workspace with a linked Jira issue
   (not just the active one) in a single run, each to its own issue, without
   switching GNOME workspaces. Workspaces with too little tracked time, no
-  Tracker timer, or a failing Jira call are skipped and reported instead of
+  prepared counter, or a failing Jira call are skipped and reported instead of
   aborting the rest.
 - `et jira status [in-progress|blocked]`: move the linked Jira issue
   directly to "In Progress" or "Blocked". With no argument, shows the
@@ -61,11 +112,16 @@ All notable changes to `et` are documented here. Format loosely follows
   issues in the Jira web UI.
 - `et ws organize`: reorder dynamic workspaces by editing their order in
   `$EDITOR` (static workspaces stay pinned). Shows a before/after summary
-  (old/new index, name, linked Jira issue, Tracker time) and asks for
-  confirmation before applying. Tracker timers follow their workspace to
+  (old/new index, name, linked Jira issue, counter time) and asks for
+  confirmation before applying. Counters follow their workspace to
   its new slot.
 
 ### Changed
+- The bundled `et` extension replaces the third-party Tracker extension.
+  Existing Tracker values are intentionally not imported; newly prepared
+  workspaces start at zero.
+- Jira issue reads now include the original estimate so the CLI can provide it
+  to the generic extension display alongside the workspace label.
 - Config gains `jira.project_key` and `jira.board_id`.
 - Jira issue references (`et jira log-time`, `et jira complete`) are now
   clickable OSC 8 terminal hyperlinks, like `et jira start` already was.
@@ -74,16 +130,15 @@ All notable changes to `et` are documented here. Format loosely follows
 - `et jira complete` now actually deletes the freed GNOME workspace instead
   of leaving an empty slot, and prompts for confirmation before freeing the
   workspace and closing the linked Jira issue.
-- `et jira start` (task creation) now cleans up stale Tracker timers left
-  behind by previously deleted workspaces.
+- `et jira start` resets a reused workspace's extension-owned counter.
 - `et ws delete` shrinks GNOME's workspace count instead of leaving a bare
-  trailing slot, and no longer orphans the Tracker timer when deleting the
+  trailing slot, and no longer orphans the counter when deleting the
   last remaining workspace.
 - Workspace names can now be up to 30 characters (up from a shorter limit).
 - Dropped the `max_workspaces` config option; `et` now requires a fixed
   (non-dynamic) set of GNOME workspaces and manages within it directly.
-- README now recommends the Workspace Switcher Manager GNOME extension for
-  showing workspace names on-screen.
+- README now documents the built-in panel/switcher display and extension
+  preferences.
 
 ### Fixed
 - Rejected Jira credentials are now reported as such instead of as an

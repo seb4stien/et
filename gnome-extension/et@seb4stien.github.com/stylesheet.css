@@ -1,0 +1,21 @@
+/* SPDX-FileCopyrightText: 2026 Sébastien Georget
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Minimal styling for the panel indicator and the injected workspace-
+ * switcher label, so the generic "label · estimate · counter" text sits
+ * comfortably alongside GNOME's own panel/switcher chrome.
+ */
+
+.et-panel-icon {
+    padding: 0 4px;
+    icon-size: 16px;
+}
+
+.et-panel-label {
+    padding: 0 6px;
+}
+
+.et-workspace-switcher-label {
+    padding: 0 8px;
+    font-weight: bold;
+}

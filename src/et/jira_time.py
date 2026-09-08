@@ -1,18 +1,19 @@
-"""Orchestrates `et jira log-time`: log the active workspace's Tracker time
+"""Orchestrates `et jira log-time`: log the active workspace's counter time
 to its linked Jira issue.
 
-Reads the ET-<n> Tracker timer bound to the active workspace, resolves the
-Jira issue linked to that workspace (its "jira:<KEY>" ref, normally set by
-`et jira start`), and logs the elapsed time as a Jira worklog for that issue
-(via `et.jira.create_worklog` — Jira's own worklog API, which still shows up
-in Tempo timesheets when Tempo is configured to sync native Jira worklogs,
-without needing a separate Tempo API token). On success the timer is reset
+Reads the extension counter bound to the active workspace (via
+`et.et_extension.get_workspace_counter`), resolves the Jira issue linked to
+that workspace (its "jira:<KEY>" ref, normally set by `et jira start`), and
+logs the elapsed time as a Jira worklog for that issue (via
+`et.jira.create_worklog` — Jira's own worklog API, which still shows up in
+Tempo timesheets when Tempo is configured to sync native Jira worklogs,
+without needing a separate Tempo API token). On success the counter is reset
 to 0 (unless disabled), since that same elapsed time has just been recorded
 and shouldn't be logged again next time. Also exposes
 `log_manual_time_for_current_workspace`, used by `et jira log-time [Xh]` to
-log a manually-specified duration without touching the Tracker timer at
+log a manually-specified duration without touching the extension counter at
 all, and `log_time_for_all_workspaces`, used by `et jira log-time --all` to
-log every Jira-linked workspace's tracker in one go regardless of which
+log every Jira-linked workspace's counter in one go regardless of which
 workspace is active. Has no Typer/CLI dependency.
 """
 
@@ -20,14 +21,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from et import tracker, workspaces
+from et import et_extension, workspaces
 from et.config import EtConfig, JiraConfig, load_config
+from et.et_extension import EtExtensionError
 from et.jira import JiraError, create_worklog, fetch_issue
 from et.jira_ref import jira_key_from_ref
-from et.tracker import TrackerError
 
 # Below this, the elapsed time is almost certainly just a stray few seconds
-# (e.g. a timer left running by accident) rather than real tracked work.
+# (e.g. a counter left running by accident) rather than real tracked work.
 MIN_LOGGABLE_SECONDS = 60
 
 
@@ -48,8 +49,9 @@ class LogTimeResult:
     workspace_index: int
     issue_key: str
     seconds_logged: int
-    tracker_reset: bool
+    counter_reset: bool
     summary: str = ""
+    counter_reset_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,7 @@ def resolve_issue_key(config: EtConfig, *, issue_key: str | None = None) -> tupl
     linked issue. Used by actions that don't need the workspace index
     itself (comment, status) — `log-time`/`complete` use
     `resolve_active_issue` directly since they also need the index (for
-    the Tracker timer / workspace deletion).
+    the extension counter / workspace deletion).
 
     Raises `JiraLogTimeError` if there's no 'jira' config block, or (when
     `issue_key` isn't given) no Jira issue is linked to the active
@@ -105,7 +107,7 @@ def resolve_active_issue(
     When `issue_key` is given, it's used directly (e.g. from `et jira`'s
     `-j/--jira KEY` override) — the active workspace's linked ref is never
     consulted for the issue key, only for its index (still needed by
-    Tracker-timer-based actions like `log-time`). Otherwise the active
+    counter-based actions like `log-time`). Otherwise the active
     workspace's linked issue ("jira:<KEY>" ref) is resolved as before.
 
     Raises `JiraLogTimeError` if there's no 'jira' config block, or (when
@@ -134,32 +136,39 @@ def resolve_active_issue(
 def log_time_for_current_workspace(
     *, description: str | None = None, reset: bool = True, issue_key: str | None = None
 ) -> LogTimeResult:
-    """Log the active workspace's ET-<n> tracker elapsed time to its Jira issue.
+    """Log the active workspace's extension counter elapsed time to its Jira issue.
 
     Logs against `issue_key` if given (e.g. via `-j/--jira`), instead of the
-    issue linked to the active workspace — the Tracker timer read/reset
-    still applies to the active workspace regardless.
+    issue linked to the active workspace — the counter read/reset still
+    applies to the active workspace regardless.
 
     Raises `ConfigError` if the config file is missing/malformed,
     `WorkspaceError` if the active workspace can't be determined, and
     `JiraLogTimeError` if: there's no 'jira' config block, no Jira issue is
-    linked to the active workspace (and none was given explicitly), no
-    Tracker timer is bound to it (or its elapsed time is under
-    `MIN_LOGGABLE_SECONDS`), or the Jira API call fails.
+    linked to the active workspace (and none was given explicitly), the
+    extension counter can't be read (e.g. the extension isn't
+    installed/enabled), its elapsed time is under `MIN_LOGGABLE_SECONDS`,
+    or the Jira API call fails.
 
-    On success, resets the tracker to 0 (unless `reset=False`) so the same
-    elapsed time isn't accidentally logged again later.
+    On success, resets the counter to 0 (unless `reset=False`) so the same
+    elapsed time isn't accidentally logged again later. The reset only
+    happens after the Jira worklog call has actually succeeded. If Jira
+    accepts the worklog but the reset fails, returns a partial-success
+    result with `counter_reset_error` populated so callers can warn against
+    retrying the already-committed worklog.
     """
     config: EtConfig = load_config()
     jira_config, index, resolved_key = resolve_active_issue(config, issue_key=issue_key)
 
-    entries = tracker.load_timers()
-    timer = tracker.find_timer_for_workspace(entries, index)
-    elapsed = timer.get("timeElapsed", 0) if timer is not None else 0
-    seconds = int(elapsed) if isinstance(elapsed, (int, float)) else 0
+    try:
+        counter = et_extension.get_workspace_counter(index)
+    except EtExtensionError as exc:
+        raise JiraLogTimeError(str(exc)) from exc
+
+    seconds = counter.elapsed_seconds
     if seconds < MIN_LOGGABLE_SECONDS:
         raise JiraLogTimeError(
-            f"workspace {index + 1}'s tracker has only {seconds}s elapsed "
+            f"workspace {index + 1}'s counter has only {seconds}s elapsed "
             f"(minimum {MIN_LOGGABLE_SECONDS}s to log)"
         )
 
@@ -168,20 +177,19 @@ def log_time_for_current_workspace(
     except JiraError as exc:
         raise JiraLogTimeError(str(exc)) from exc
 
+    counter_reset_error: str | None = None
     if reset:
-        assert timer is not None  # seconds >= MIN_LOGGABLE_SECONDS implies a timer was found
-        timer["timeElapsed"] = 0
-        timer["running"] = False
         try:
-            tracker.save_timers_with_reload(entries, "resetting timer after logging to Jira")
-        except TrackerError as exc:
-            raise JiraLogTimeError(str(exc)) from exc
+            et_extension.reset_workspace_counter(index)
+        except EtExtensionError as exc:
+            counter_reset_error = str(exc)
 
     return LogTimeResult(
         workspace_index=index,
         issue_key=resolved_key,
         seconds_logged=seconds,
-        tracker_reset=reset,
+        counter_reset=reset and counter_reset_error is None,
+        counter_reset_error=counter_reset_error,
     )
 
 
@@ -191,13 +199,13 @@ def log_manual_time_for_current_workspace(
     """Log a manually-specified `seconds` duration to the active workspace's Jira issue.
 
     Like `log_time_for_current_workspace`, but the duration comes from the
-    caller (e.g. `et jira log-time 2h`) instead of the Tracker timer's
-    elapsed time — so the Tracker timer is never read or reset. Logs
-    against `issue_key` if given (e.g. via `-j/--jira`), instead of the
-    issue linked to the active workspace. Raises
+    caller (e.g. `et jira log-time 2h`) instead of the extension counter's
+    elapsed time — so the counter is never read or reset. Logs against
+    `issue_key` if given (e.g. via `-j/--jira`), instead of the issue linked
+    to the active workspace. Raises
     `ConfigError`/`WorkspaceError`/`JiraLogTimeError` under the same
     conditions as `log_time_for_current_workspace` (minus the
-    Tracker-timer-related ones).
+    counter-related ones).
     """
     config: EtConfig = load_config()
     jira_config, index, resolved_key = resolve_active_issue(config, issue_key=issue_key)
@@ -211,7 +219,7 @@ def log_manual_time_for_current_workspace(
         workspace_index=index,
         issue_key=resolved_key,
         seconds_logged=seconds,
-        tracker_reset=False,
+        counter_reset=False,
     )
 
 
@@ -223,26 +231,30 @@ def log_time_for_all_workspaces(
     Unlike `log_time_for_current_workspace`, this never consults the
     active GNOME workspace: it walks every entry in the config's
     `workspaces` list, and for each one with a linked Jira issue
-    ("jira:<KEY>" ref) logs its ET-<n> Tracker timer's elapsed time to that
+    ("jira:<KEY>" ref) logs its extension counter's elapsed time to that
     issue. Workspaces with no linked issue are ignored entirely (not even
     reported).
 
     A workspace is skipped (recorded in `AllLogTimeResult.skipped`, not
-    raised) when: it has no Tracker timer, its elapsed time is under
-    `MIN_LOGGABLE_SECONDS`, or the Jira API call for that one issue fails
-    — so a single bad workspace never stops the rest from being logged.
-    A skipped workspace's timer is left untouched either way.
+    raised) when: its extension counter can't be read (e.g. it was never
+    prepared, or the extension isn't installed/enabled), its elapsed time
+    is under `MIN_LOGGABLE_SECONDS`, or the Jira API call for that one
+    issue fails — so a single bad workspace never stops the rest from
+    being logged. A skipped workspace's counter is left untouched either
+    way.
 
     On success for a given workspace, if `reset` is True, that workspace's
-    timer is zeroed and saved immediately (one `save_timers_with_reload`
-    call per successfully-logged workspace, not batched at the end) — so
-    an interruption partway through, or a later workspace's Jira call
+    counter is reset immediately (one `reset_workspace_counter` call per
+    successfully-logged workspace, not batched at the end) — so an
+    interruption partway through, or a later workspace's Jira call
     failing, never leaves an already-logged workspace un-reset, and never
     resets a workspace whose Jira call actually failed.
 
     Raises `ConfigError` if the config file is missing/malformed, and
-    `JiraLogTimeError` only when there's no 'jira' config block at all
-    (every other failure becomes a per-workspace skip instead).
+    `JiraLogTimeError` only when there's no 'jira' config block at all.
+    Every per-workspace failure becomes either a skip or, when Jira accepted
+    the worklog but the counter reset failed, a partial-success
+    `LogTimeResult` with `counter_reset_error` populated.
     """
     config: EtConfig = load_config()
     if config.jira is None:
@@ -252,7 +264,6 @@ def log_time_for_all_workspaces(
         )
     jira_config = config.jira
 
-    entries = tracker.load_timers()
     logged: list[LogTimeResult] = []
     skipped: list[SkippedWorkspace] = []
 
@@ -261,20 +272,19 @@ def log_time_for_all_workspaces(
         if issue_key is None:
             continue
 
-        timer = tracker.find_timer_for_workspace(entries, index)
-        elapsed = timer.get("timeElapsed", 0) if timer is not None else 0
-        seconds = int(elapsed) if isinstance(elapsed, (int, float)) else 0
-
-        if timer is None:
+        try:
+            counter = et_extension.get_workspace_counter(index)
+        except EtExtensionError as exc:
             skipped.append(
                 SkippedWorkspace(
                     workspace_index=index,
                     issue_key=issue_key,
-                    reason="no Tracker timer for this workspace",
+                    reason=f"no prepared counter for this workspace: {exc}",
                 )
             )
             continue
 
+        seconds = counter.elapsed_seconds
         if seconds < MIN_LOGGABLE_SECONDS:
             skipped.append(
                 SkippedWorkspace(
@@ -301,23 +311,21 @@ def log_time_for_all_workspaces(
         except JiraError:
             summary = ""
 
+        counter_reset_error: str | None = None
         if reset:
-            timer["timeElapsed"] = 0
-            timer["running"] = False
             try:
-                tracker.save_timers_with_reload(
-                    entries, f"resetting workspace {index + 1}'s timer after logging to Jira"
-                )
-            except TrackerError as exc:
-                raise JiraLogTimeError(str(exc)) from exc
+                et_extension.reset_workspace_counter(index)
+            except EtExtensionError as exc:
+                counter_reset_error = str(exc)
 
         logged.append(
             LogTimeResult(
                 workspace_index=index,
                 issue_key=issue_key,
                 seconds_logged=seconds,
-                tracker_reset=reset,
+                counter_reset=reset and counter_reset_error is None,
                 summary=summary,
+                counter_reset_error=counter_reset_error,
             )
         )
 

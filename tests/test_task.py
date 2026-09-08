@@ -1,12 +1,13 @@
-"""Tests for et.task, mocking et.config/et.workspaces/et.tracker/et.jira/et.jira_time."""
+"""Tests for et.task, mocking et.config/et.workspaces/et.et_extension/et.jira/et.jira_time."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from et.config import ConfigError, EtConfig, JiraConfig, WorkspaceConfigEntry
+from et.et_extension import EtExtensionError
 from et.jira import JiraError, JiraIssue, JiraSprint, JiraTransition
 from et.jira_time import JiraLogTimeError, LogTimeResult
 from et.task import (
@@ -23,7 +24,6 @@ from et.task import (
     get_current_status_for_current_workspace,
     set_status_for_current_workspace,
 )
-from et.tracker import TrackerError
 from et.workspaces import WorkspaceError
 from et.ws import WsDeleteError
 
@@ -55,7 +55,7 @@ def _config(
 @patch("et.task.workspaces.switch_to_workspace")
 @patch("et.task.workspaces.rename_all_workspaces")
 @patch("et.task.save_config")
-@patch("et.task.tracker.prepare_timer_for_workspace", return_value=("ET-1", True))
+@patch("et.task.et_extension.prepare_workspace")
 @patch("et.task.workspaces.set_workspace_count")
 @patch("et.task.workspaces.get_workspace_count", return_value=5)
 @patch("et.task.load_config")
@@ -63,7 +63,7 @@ def test_create_task_workspace_uses_first_free_slot(
     mock_load_config,
     _mock_get_count,
     mock_set_count,
-    mock_add_tracker,
+    mock_prepare_workspace,
     mock_save_config,
     mock_rename_all,
     mock_switch,
@@ -82,10 +82,9 @@ def test_create_task_workspace_uses_first_free_slot(
     assert result.workspace_index == 1
     assert result.name == "my-task"
     assert result.ref is None
-    assert result.timer_created is True
 
     mock_set_count.assert_not_called()
-    mock_add_tracker.assert_called_once_with(1, 5)
+    mock_prepare_workspace.assert_called_once_with(1, "doing stuff", 0)
     saved_config = mock_save_config.call_args[0][0]
     assert saved_config.workspaces[1] == WorkspaceConfigEntry(
         name="my-task", ref=None, description="doing stuff"
@@ -100,7 +99,7 @@ def test_create_task_workspace_uses_first_free_slot(
 @patch("et.task.workspaces.switch_to_workspace")
 @patch("et.task.workspaces.rename_all_workspaces")
 @patch("et.task.save_config")
-@patch("et.task.tracker.prepare_timer_for_workspace", return_value=("ET-1", True))
+@patch("et.task.et_extension.prepare_workspace")
 @patch("et.task.workspaces.set_workspace_count")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
@@ -108,7 +107,7 @@ def test_create_task_workspace_succeeds_when_window_move_unsupported(
     mock_load_config,
     _mock_get_count,
     _mock_set_count,
-    _mock_add_tracker,
+    _mock_prepare_workspace,
     _mock_save_config,
     _mock_rename_all,
     mock_switch,
@@ -128,7 +127,7 @@ def test_create_task_workspace_succeeds_when_window_move_unsupported(
 @patch("et.task.workspaces.switch_to_workspace")
 @patch("et.task.workspaces.rename_all_workspaces")
 @patch("et.task.save_config")
-@patch("et.task.tracker.prepare_timer_for_workspace", return_value=("ET-2", True))
+@patch("et.task.et_extension.prepare_workspace")
 @patch("et.task.workspaces.set_workspace_count")
 @patch("et.task.workspaces.get_workspace_count", return_value=3)
 @patch("et.task.load_config")
@@ -136,7 +135,7 @@ def test_create_task_workspace_uses_implicit_bare_slot_within_count(
     mock_load_config,
     _mock_get_count,
     mock_set_count,
-    mock_add_tracker,
+    mock_prepare_workspace,
     mock_save_config,
     _mock_rename_all,
     _mock_switch,
@@ -153,14 +152,14 @@ def test_create_task_workspace_uses_implicit_bare_slot_within_count(
     assert result is not None
     assert result.workspace_index == 1
     mock_set_count.assert_not_called()
-    mock_add_tracker.assert_called_once_with(1, 3)
+    mock_prepare_workspace.assert_called_once_with(1, "my-task", 0)
 
 
 @patch("et.task.workspaces.move_active_window_to_workspace")
 @patch("et.task.workspaces.switch_to_workspace")
 @patch("et.task.workspaces.rename_all_workspaces")
 @patch("et.task.save_config")
-@patch("et.task.tracker.prepare_timer_for_workspace", return_value=("ET-3", True))
+@patch("et.task.et_extension.prepare_workspace")
 @patch("et.task.workspaces.set_workspace_count")
 @patch("et.task.workspaces.get_workspace_count", return_value=2)
 @patch("et.task.load_config")
@@ -168,7 +167,7 @@ def test_create_task_workspace_prompts_and_grows_when_all_full(
     mock_load_config,
     _mock_get_count,
     mock_set_count,
-    mock_add_tracker,
+    mock_prepare_workspace,
     mock_save_config,
     _mock_rename_all,
     _mock_switch,
@@ -193,20 +192,20 @@ def test_create_task_workspace_prompts_and_grows_when_all_full(
     assert result.workspace_index == 2
     assert seen_count == [2]
     mock_set_count.assert_called_once_with(3)
-    mock_add_tracker.assert_called_once_with(2, 3)
+    mock_prepare_workspace.assert_called_once_with(2, "my-task", 0)
     saved_config = mock_save_config.call_args[0][0]
     assert len(saved_config.workspaces) == 3
 
 
 @patch("et.task.workspaces.set_workspace_count")
 @patch("et.task.save_config")
-@patch("et.task.tracker.prepare_timer_for_workspace")
+@patch("et.task.et_extension.prepare_workspace")
 @patch("et.task.workspaces.get_workspace_count", return_value=2)
 @patch("et.task.load_config")
 def test_create_task_workspace_returns_none_when_grow_declined(
     mock_load_config,
     _mock_get_count,
-    mock_add_tracker,
+    mock_prepare_workspace,
     mock_save_config,
     mock_set_count,
 ):
@@ -221,7 +220,7 @@ def test_create_task_workspace_returns_none_when_grow_declined(
 
     assert result is None
     mock_set_count.assert_not_called()
-    mock_add_tracker.assert_not_called()
+    mock_prepare_workspace.assert_not_called()
     mock_save_config.assert_not_called()
 
 
@@ -234,24 +233,28 @@ def test_create_task_workspace_wraps_workspace_error(mock_load_config, _mock_get
         create_task_workspace("my-task")
 
 
-@patch("et.task.tracker.prepare_timer_for_workspace", side_effect=TrackerError("tracker boom"))
+@patch(
+    "et.task.et_extension.prepare_workspace",
+    side_effect=EtExtensionError("extension boom"),
+)
+@patch("et.task.save_config")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
-def test_create_task_workspace_wraps_tracker_error(
-    mock_load_config, _mock_get_count, _mock_add_tracker
+def test_create_task_workspace_wraps_extension_error(
+    mock_load_config, _mock_get_count, _mock_save_config, _mock_prepare_workspace
 ):
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ET-1")])
 
-    with pytest.raises(TaskError, match="tracker boom"):
+    with pytest.raises(TaskError, match="extension boom"):
         create_task_workspace("my-task")
 
 
 @patch("et.task.save_config", side_effect=ConfigError("config boom"))
-@patch("et.task.tracker.prepare_timer_for_workspace", return_value=("ET-1", True))
+@patch("et.task.et_extension.prepare_workspace")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
 def test_create_task_workspace_wraps_config_error(
-    mock_load_config, _mock_get_count, _mock_add_tracker, _mock_save_config
+    mock_load_config, _mock_get_count, _mock_prepare_workspace, _mock_save_config
 ):
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ET-1")])
 
@@ -259,13 +262,52 @@ def test_create_task_workspace_wraps_config_error(
         create_task_workspace("my-task")
 
 
+@patch("et.task.workspaces.switch_to_workspace")
+@patch("et.task.et_extension.prepare_workspace", side_effect=EtExtensionError("prepare boom"))
+@patch("et.task.workspaces.rename_all_workspaces")
+@patch("et.task.save_config")
+@patch("et.task.workspaces.set_workspace_count")
+@patch("et.task.workspaces.get_workspace_count", return_value=1)
+@patch("et.task.load_config")
+def test_create_task_workspace_rolls_back_reversible_state_on_failure(
+    mock_load_config,
+    _mock_get_count,
+    mock_set_count,
+    mock_save_config,
+    mock_rename_all,
+    mock_prepare,
+    mock_switch,
+):
+    original_config = _config([WorkspaceConfigEntry(name="ISD-A", ref="jira:ISD-A")])
+    mock_load_config.return_value = original_config
+
+    with pytest.raises(TaskError, match="operation may be partially applied"):
+        create_task_workspace("my-task", confirm_grow=lambda _count: True)
+
+    assert mock_set_count.call_args_list == [call(2), call(1)]
+    assert mock_save_config.call_args_list[-1] == call(original_config)
+    assert mock_rename_all.call_args_list == [call(["ISD-A", "my-task"]), call(["ISD-A"])]
+    mock_prepare.assert_called_once_with(1, "my-task", 0)
+    mock_switch.assert_not_called()
+
+
 # --- create_task_from_jira --------------------------------------------------
 
 
 def _issue(
-    key: str, summary: str = "Some issue", priority: str = "High", status: str = ""
+    key: str,
+    summary: str = "Some issue",
+    priority: str = "High",
+    status: str = "",
+    original_estimate_seconds: int | None = None,
 ) -> JiraIssue:
-    return JiraIssue(key=key, summary=summary, priority=priority, status=status)
+    return JiraIssue(
+        key=key,
+        summary=summary,
+        priority=priority,
+        status=status,
+        original_estimate_seconds=original_estimate_seconds,
+    )
 
 
 @patch("et.task.load_config")
@@ -329,8 +371,23 @@ def test_create_task_from_jira_delegates_to_create_task_workspace(
         name="A rather long issue summary he",
         description="A rather long issue summary here",
         ref="jira:ISD-2",
+        estimate_seconds=None,
         confirm_grow=confirm_grow,
     )
+
+
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_active_issues")
+@patch("et.task.load_config")
+def test_create_task_from_jira_forwards_original_estimate_seconds(
+    mock_load_config, mock_fetch, mock_create_task_workspace
+):
+    mock_load_config.return_value = _config()
+    mock_fetch.return_value = [_issue("ISD-2", original_estimate_seconds=3600)]
+
+    create_task_from_jira(select_issue=lambda issues: issues[0])
+
+    assert mock_create_task_workspace.call_args.kwargs["estimate_seconds"] == 3600
 
 
 @patch("et.task.create_task_workspace")
@@ -486,9 +543,27 @@ def test_create_task_from_jira_key_delegates_to_create_task_workspace(
         name="A rather long issue summary he",
         description="A rather long issue summary here",
         ref="jira:ISD-2",
+        estimate_seconds=None,
         confirm_grow=confirm_grow,
     )
     mock_ensure_sprint.assert_called_once()
+
+
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_forwards_original_estimate_seconds(
+    mock_load_config, mock_fetch_issue, mock_create_task_workspace, _mock_ensure_sprint
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue(
+        "ISD-2", status="In Progress", original_estimate_seconds=7200
+    )
+
+    create_task_from_jira_key("ISD-2")
+
+    assert mock_create_task_workspace.call_args.kwargs["estimate_seconds"] == 7200
 
 
 @patch("et.task.ensure_issue_in_active_sprint")
@@ -751,18 +826,6 @@ def test_ensure_issue_in_active_sprint_warns_when_fetch_issue_sprint_fails(
 # --- complete_task_for_current_workspace ------------------------------------
 
 
-def _timer(workspace_id: int, name: str, elapsed: int = 0, running: bool = False) -> dict:
-    return {
-        "id": f"timer-{workspace_id}",
-        "name": name,
-        "timeElapsed": elapsed,
-        "running": running,
-        "selected": False,
-        "workspaceId": workspace_id,
-        "autoResume": True,
-    }
-
-
 @patch("et.task.delete_active_workspace")
 @patch("et.task.workspaces.get_workspace_count", return_value=3)
 @patch("et.task.load_config")
@@ -771,7 +834,7 @@ def test_complete_task_deletes_workspace_after_logging(
     mock_log_time, mock_load_config, _mock_count, mock_delete
 ):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=1, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=1, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config(
         [
@@ -796,7 +859,7 @@ def test_complete_task_deletes_workspace_after_logging(
 @patch("et.task.log_time_for_current_workspace")
 def test_complete_task_forwards_issue_key_override(mock_log_time, mock_load_config):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=1, issue_key="ISD-999", seconds_logged=780, tracker_reset=True
+        workspace_index=1, issue_key="ISD-999", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config(
         [WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")]
@@ -810,8 +873,7 @@ def test_complete_task_forwards_issue_key_override(mock_log_time, mock_load_conf
 
 @patch("et.task.workspaces.rename_all_workspaces")
 @patch("et.task.save_config")
-@patch("et.task.tracker.save_timers_with_reload")
-@patch("et.task.tracker.load_timers")
+@patch("et.task.et_extension.remove_workspace")
 @patch("et.task.delete_active_workspace")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
@@ -821,21 +883,18 @@ def test_complete_task_resets_slot_when_single_workspace_left(
     mock_load_config,
     _mock_count,
     mock_delete,
-    mock_load_timers,
-    mock_save_timers,
+    mock_remove,
     mock_save_config,
     mock_rename_all,
 ):
     # GNOME can't drop below one workspace, so completing the only workspace
     # resets its slot to a bare "ET-1" instead of deleting it.
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=0, issue_key="ISD-1", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-1", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config(
         [WorkspaceConfigEntry(name="ISD-1", ref="jira:ISD-1", description="stuff")]
     )
-    stale_timer = _timer(0, "ET-1", elapsed=0)
-    mock_load_timers.return_value = [stale_timer]
 
     result = complete_task_for_current_workspace(confirm_delete=lambda _result: True)
 
@@ -845,9 +904,7 @@ def test_complete_task_resets_slot_when_single_workspace_left(
     saved_config = mock_save_config.call_args[0][0]
     assert saved_config.workspaces == [WorkspaceConfigEntry(name="ET-1")]
     mock_rename_all.assert_called_once_with(["ET-1"])
-
-    saved_timers = mock_save_timers.call_args[0][0]
-    assert stale_timer not in saved_timers
+    mock_remove.assert_called_once_with(0)
 
 
 @patch("et.task.log_time_for_current_workspace", side_effect=JiraLogTimeError("no timer"))
@@ -864,7 +921,7 @@ def test_complete_task_wraps_ws_delete_error(
     mock_log_time, mock_load_config, _mock_count, _mock_delete
 ):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=0, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
 
@@ -874,15 +931,15 @@ def test_complete_task_wraps_ws_delete_error(
 
 @patch("et.task.workspaces.rename_all_workspaces", side_effect=WorkspaceError("rename boom"))
 @patch("et.task.save_config")
-@patch("et.task.tracker.load_timers", return_value=[])
+@patch("et.task.et_extension.remove_workspace")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
 @patch("et.task.log_time_for_current_workspace")
 def test_complete_task_wraps_workspace_error_after_logging(
-    mock_log_time, mock_load_config, _mock_count, _mock_load_timers, _mock_save_config, _rename
+    mock_log_time, mock_load_config, _mock_count, _mock_remove, _mock_save_config, _rename
 ):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=0, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
 
@@ -890,19 +947,23 @@ def test_complete_task_wraps_workspace_error_after_logging(
         complete_task_for_current_workspace(confirm_delete=lambda _result: True)
 
 
-@patch("et.task.tracker.load_timers", side_effect=TrackerError("no schema"))
+@patch(
+    "et.task.et_extension.remove_workspace",
+    side_effect=EtExtensionError("extension down"),
+)
+@patch("et.task.save_config")
 @patch("et.task.workspaces.get_workspace_count", return_value=1)
 @patch("et.task.load_config")
 @patch("et.task.log_time_for_current_workspace")
-def test_complete_task_wraps_tracker_error_loading_timers(
-    mock_log_time, mock_load_config, _mock_count, _mock_load_timers
+def test_complete_task_wraps_extension_error_freeing_slot(
+    mock_log_time, mock_load_config, _mock_count, _mock_save_config, _mock_remove
 ):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=0, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
 
-    with pytest.raises(TaskError, match="no schema"):
+    with pytest.raises(TaskError, match="extension down"):
         complete_task_for_current_workspace(confirm_delete=lambda _result: True)
 
 
@@ -910,7 +971,7 @@ def test_complete_task_wraps_tracker_error_loading_timers(
 @patch("et.task.log_time_for_current_workspace")
 def test_complete_task_reports_logged_time_before_prompts(mock_log_time, mock_load_config):
     log_result = LogTimeResult(
-        workspace_index=0, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_log_time.return_value = log_result
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
@@ -925,14 +986,13 @@ def test_complete_task_reports_logged_time_before_prompts(mock_log_time, mock_lo
 
 @patch("et.task.workspaces.rename_all_workspaces")
 @patch("et.task.save_config")
-@patch("et.task.tracker.load_timers", return_value=[])
 @patch("et.task.load_config")
 @patch("et.task.log_time_for_current_workspace")
 def test_complete_task_leaves_workspace_when_delete_declined(
-    mock_log_time, mock_load_config, _mock_load_timers, mock_save_config, mock_rename_all
+    mock_log_time, mock_load_config, mock_save_config, mock_rename_all
 ):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=0, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
 
@@ -943,6 +1003,27 @@ def test_complete_task_leaves_workspace_when_delete_declined(
     mock_rename_all.assert_not_called()
 
 
+@patch("et.task.delete_active_workspace")
+@patch("et.task.log_time_for_current_workspace")
+def test_complete_task_keeps_workspace_when_counter_reset_failed(
+    mock_log_time, mock_delete_workspace
+):
+    mock_log_time.return_value = LogTimeResult(
+        workspace_index=0,
+        issue_key="ISD-2",
+        seconds_logged=780,
+        counter_reset=False,
+        counter_reset_error="extension unavailable",
+    )
+    confirm_delete = MagicMock(return_value=True)
+
+    result = complete_task_for_current_workspace(confirm_delete=confirm_delete)
+
+    assert result.workspace_freed is False
+    confirm_delete.assert_not_called()
+    mock_delete_workspace.assert_not_called()
+
+
 @patch("et.task.transition_issue")
 @patch("et.task.fetch_transitions")
 @patch("et.task.load_config")
@@ -951,7 +1032,7 @@ def test_complete_task_moves_issue_to_done_when_confirmed(
     mock_log_time, mock_load_config, mock_fetch_transitions, mock_transition_issue
 ):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=0, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
     mock_fetch_transitions.return_value = [
@@ -973,7 +1054,7 @@ def test_complete_task_raises_when_no_done_transition_available(
     mock_log_time, mock_load_config, mock_fetch_transitions, mock_transition_issue
 ):
     mock_log_time.return_value = LogTimeResult(
-        workspace_index=0, issue_key="ISD-2", seconds_logged=780, tracker_reset=True
+        workspace_index=0, issue_key="ISD-2", seconds_logged=780, counter_reset=True
     )
     mock_load_config.return_value = _config([WorkspaceConfigEntry(name="ISD-2", ref="jira:ISD-2")])
     mock_fetch_transitions.return_value = [

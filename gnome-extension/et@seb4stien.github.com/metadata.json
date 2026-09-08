@@ -1,0 +1,9 @@
+{
+  "uuid": "et@seb4stien.github.com",
+  "name": "et Workspace Timer",
+  "description": "D-Bus companion service for the et CLI (https://github.com/seb4stien/et). Exposes GNOME Shell state (the active workspace index) that isn't otherwise reachable under Wayland, and owns persistent per-workspace counters shown in the top panel and workspace switcher, replacing the third-party Tracker extension.",
+  "shell-version": ["46", "50"],
+  "url": "https://github.com/seb4stien/et",
+  "settings-schema": "org.gnome.shell.extensions.et",
+  "gettext-domain": "et@seb4stien.github.com"
+}
