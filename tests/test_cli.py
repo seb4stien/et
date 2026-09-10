@@ -528,9 +528,10 @@ def test_jira_start_lists_issues_and_creates_from_selection(mock_create_from_jir
         workspace_index=2, name="ISD-2", ref="jira:ISD-2", window_moved=True
     )
 
-    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
         del confirm_grow
         del confirm_transition
+        del confirm_assign
         issues = [
             JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="In Progress")
         ]
@@ -554,9 +555,10 @@ def test_jira_start_notes_when_window_could_not_be_moved(mock_create_from_jira):
         workspace_index=2, name="ISD-2", ref="jira:ISD-2", window_moved=False
     )
 
-    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
         del confirm_grow
         del confirm_transition
+        del confirm_assign
         issues = [
             JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="In Progress")
         ]
@@ -595,9 +597,10 @@ def test_jira_start_reports_error(mock_create_from_jira):
 def test_jira_start_prompts_to_move_issue_to_in_progress_when_confirmed(mock_create_from_jira):
     captured = {}
 
-    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
         del confirm_grow
         del select_issue
+        del confirm_assign
         issue = JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="To Do")
         captured["confirmed"] = confirm_transition(issue)
         return None
@@ -615,9 +618,10 @@ def test_jira_start_prompts_to_move_issue_to_in_progress_when_confirmed(mock_cre
 def test_jira_start_does_not_transition_when_declined(mock_create_from_jira):
     captured = {}
 
-    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
         del confirm_grow
         del select_issue
+        del confirm_assign
         issue = JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="To Do")
         captured["confirmed"] = confirm_transition(issue)
         return None
@@ -634,9 +638,10 @@ def test_jira_start_does_not_transition_when_declined(mock_create_from_jira):
 def test_jira_start_defaults_transition_prompt_to_yes(mock_create_from_jira):
     captured = {}
 
-    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
         del confirm_grow
         del select_issue
+        del confirm_assign
         issue = JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="To Do")
         captured["confirmed"] = confirm_transition(issue)
         return None
@@ -654,9 +659,10 @@ def test_jira_start_defaults_transition_prompt_to_yes(mock_create_from_jira):
 def test_jira_start_defaults_grow_prompt_to_yes(mock_create_from_jira):
     captured = {}
 
-    def fake_create_from_jira(select_issue, confirm_transition, confirm_grow):
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
         del confirm_transition
         del select_issue
+        del confirm_assign
         captured["confirmed"] = confirm_grow(4)
         return None
 
@@ -666,6 +672,68 @@ def test_jira_start_defaults_grow_prompt_to_yes(mock_create_from_jira):
 
     assert result.exit_code == 0
     assert "All 4 workspaces are in use. Add another workspace? [Y/n]" in result.stdout
+
+
+@patch("et.cli.create_task_from_jira")
+def test_jira_start_prompts_to_assign_issue_to_self_when_confirmed(mock_create_from_jira):
+    captured = {}
+
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
+        del confirm_grow
+        del select_issue
+        del confirm_transition
+        issue = JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="To Do")
+        captured["confirmed"] = confirm_assign(issue)
+        return None
+
+    mock_create_from_jira.side_effect = fake_create_from_jira
+
+    result = runner.invoke(app, ["jira", "start"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "Assign ISD-2 to yourself?" in result.stdout
+    assert captured["confirmed"] is True
+
+
+@patch("et.cli.create_task_from_jira")
+def test_jira_start_does_not_assign_when_declined(mock_create_from_jira):
+    captured = {}
+
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
+        del confirm_grow
+        del select_issue
+        del confirm_transition
+        issue = JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="To Do")
+        captured["confirmed"] = confirm_assign(issue)
+        return None
+
+    mock_create_from_jira.side_effect = fake_create_from_jira
+
+    result = runner.invoke(app, ["jira", "start"], input="n\n")
+
+    assert result.exit_code == 0
+    assert captured["confirmed"] is False
+
+
+@patch("et.cli.create_task_from_jira")
+def test_jira_start_defaults_assign_prompt_to_yes(mock_create_from_jira):
+    captured = {}
+
+    def fake_create_from_jira(select_issue, confirm_transition, confirm_assign, confirm_grow):
+        del confirm_grow
+        del select_issue
+        del confirm_transition
+        issue = JiraIssue(key="ISD-2", summary="Second issue", priority="High", status="To Do")
+        captured["confirmed"] = confirm_assign(issue)
+        return None
+
+    mock_create_from_jira.side_effect = fake_create_from_jira
+
+    result = runner.invoke(app, ["jira", "start"], input="\n")
+
+    assert result.exit_code == 0
+    assert "Assign ISD-2 to yourself? [Y/n]" in result.stdout
+    assert captured["confirmed"] is True
 
 
 @patch("et.cli.create_task_from_jira_key")
@@ -699,11 +767,12 @@ def test_jira_start_with_key_prompts_to_move_issue_to_in_progress_when_confirmed
     captured = {}
 
     def fake_create_from_jira_key(
-        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+        issue_key, confirm_transition, confirm_assign, select_sprint, confirm_grow, warn
     ):
         del select_sprint
         del confirm_grow
         del warn
+        del confirm_assign
         issue = JiraIssue(key=issue_key, summary="Second issue", priority="High", status="To Do")
         captured["confirmed"] = confirm_transition(issue)
         return TaskCreateResult(
@@ -721,15 +790,45 @@ def test_jira_start_with_key_prompts_to_move_issue_to_in_progress_when_confirmed
 
 
 @patch("et.cli.create_task_from_jira_key")
+def test_jira_start_with_key_prompts_to_assign_issue_to_self_when_confirmed(
+    mock_create_from_jira_key,
+):
+    captured = {}
+
+    def fake_create_from_jira_key(
+        issue_key, confirm_transition, confirm_assign, select_sprint, confirm_grow, warn
+    ):
+        del select_sprint
+        del confirm_grow
+        del warn
+        del confirm_transition
+        issue = JiraIssue(key=issue_key, summary="Second issue", priority="High", status="To Do")
+        captured["confirmed"] = confirm_assign(issue)
+        return TaskCreateResult(
+            workspace_index=0, name="ISD-2", ref="jira:ISD-2",
+            window_moved=True,
+        )
+
+    mock_create_from_jira_key.side_effect = fake_create_from_jira_key
+
+    result = runner.invoke(app, ["jira", "start", "ISD-2"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "Assign ISD-2 to yourself?" in result.stdout
+    assert captured["confirmed"] is True
+
+
+@patch("et.cli.create_task_from_jira_key")
 def test_jira_start_with_key_prompts_to_add_to_sprint(mock_create_from_jira_key):
     captured = {}
 
     def fake_create_from_jira_key(
-        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+        issue_key, confirm_transition, confirm_assign, select_sprint, confirm_grow, warn
     ):
         del confirm_transition
         del confirm_grow
         del warn
+        del confirm_assign
         captured["selected"] = select_sprint([JiraSprint(id="7", name="Sprint 7")])
         return TaskCreateResult(
             workspace_index=0, name="ISD-2", ref="jira:ISD-2",
@@ -752,11 +851,12 @@ def test_jira_start_with_key_prompts_to_choose_among_multiple_active_sprints(
     captured = {}
 
     def fake_create_from_jira_key(
-        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+        issue_key, confirm_transition, confirm_assign, select_sprint, confirm_grow, warn
     ):
         del confirm_transition
         del confirm_grow
         del warn
+        del confirm_assign
         captured["selected"] = select_sprint(
             [JiraSprint(id="7", name="Sprint 7"), JiraSprint(id="8", name="Sprint 8")]
         )
@@ -777,12 +877,13 @@ def test_jira_start_with_key_prompts_to_choose_among_multiple_active_sprints(
 @patch("et.cli.create_task_from_jira_key")
 def test_jira_start_with_key_prints_warnings(mock_create_from_jira_key):
     def fake_create_from_jira_key(
-        issue_key, confirm_transition, select_sprint, confirm_grow, warn
+        issue_key, confirm_transition, confirm_assign, select_sprint, confirm_grow, warn
     ):
         del issue_key
         del confirm_transition
         del select_sprint
         del confirm_grow
+        del confirm_assign
         warn("no active sprint found on the project's board; skipping sprint")
         return TaskCreateResult(
             workspace_index=0, name="ISD-2", ref="jira:ISD-2",

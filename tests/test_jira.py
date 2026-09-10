@@ -15,6 +15,7 @@ from et.jira import (
     JiraSprint,
     JiraTransition,
     add_issue_to_sprint,
+    assign_issue,
     create_comment,
     create_issue,
     create_worklog,
@@ -62,12 +63,15 @@ def _issue(
     priority: str,
     status: str | None = None,
     original_estimate_seconds: int | None = None,
+    assignee_account_id: str | None = None,
 ) -> dict:
     fields: dict[str, object] = {"summary": summary, "priority": {"name": priority}}
     if status is not None:
         fields["status"] = {"name": status}
     if original_estimate_seconds is not None:
         fields["timetracking"] = {"originalEstimateSeconds": original_estimate_seconds}
+    if assignee_account_id is not None:
+        fields["assignee"] = {"accountId": assignee_account_id}
     return {"key": key, "fields": fields}
 
 
@@ -98,7 +102,7 @@ def test_fetch_active_issues_passes_jql_and_basic_auth(mock_get):
     assert args[0] == "https://example.atlassian.net/rest/api/3/search/jql"
     assert kwargs["params"] == {
         "jql": config.jql,
-        "fields": "summary,priority,status,timetracking",
+        "fields": "summary,priority,status,timetracking,assignee",
     }
     assert kwargs["auth"] == (config.email, config.pat)
 
@@ -301,6 +305,26 @@ def test_fetch_active_issues_defaults_original_estimate_seconds_to_none_when_mis
     assert issues[0].original_estimate_seconds is None
 
 
+@patch("et.jira.requests.get")
+def test_fetch_active_issues_parses_assignee_account_id(mock_get):
+    mock_get.return_value = _response(
+        [_issue("PROJ-1", "Task A", "High", assignee_account_id="account-123")]
+    )
+
+    issues = fetch_active_issues(_config())
+
+    assert issues[0].assignee_account_id == "account-123"
+
+
+@patch("et.jira.requests.get")
+def test_fetch_active_issues_defaults_assignee_account_id_to_none_when_unassigned(mock_get):
+    mock_get.return_value = _response([_issue("PROJ-1", "Task A", "High")])
+
+    issues = fetch_active_issues(_config())
+
+    assert issues[0].assignee_account_id is None
+
+
 def _json_response(status_code: int, payload: object) -> MagicMock:
     response = MagicMock()
     response.status_code = status_code
@@ -457,6 +481,36 @@ def test_transition_issue_wraps_network_errors(mock_post):
         transition_issue(_config(), "PROJ-1", "11")
 
 
+# --- assign_issue ---------------------------------------------------------
+
+
+@patch("et.jira.requests.put")
+def test_assign_issue_puts_account_id(mock_put):
+    mock_put.return_value = _json_response(204, {})
+    config = _config(base_url="https://example.atlassian.net")
+
+    assign_issue(config, "PROJ-1", "account-123")
+
+    args, kwargs = mock_put.call_args
+    assert args[0] == "https://example.atlassian.net/rest/api/3/issue/PROJ-1/assignee"
+    assert kwargs["json"] == {"accountId": "account-123"}
+    assert kwargs["auth"] == (config.email, config.pat)
+
+
+@patch("et.jira.requests.put")
+def test_assign_issue_raises_on_non_204_status(mock_put):
+    mock_put.return_value = _json_response(400, {"errorMessages": ["bad request"]})
+
+    with pytest.raises(JiraError, match="400"):
+        assign_issue(_config(), "PROJ-1", "account-123")
+
+
+@patch("et.jira.requests.put", side_effect=requests.ConnectionError("no route to host"))
+def test_assign_issue_wraps_network_errors(mock_put):
+    with pytest.raises(JiraError, match="no route to host"):
+        assign_issue(_config(), "PROJ-1", "account-123")
+
+
 # --- create_comment -----------------------------------------------------
 
 
@@ -551,7 +605,7 @@ def test_fetch_issue_returns_summary_priority_and_status(mock_get):
     )
     args, kwargs = mock_get.call_args
     assert args[0] == "https://example.atlassian.net/rest/api/3/issue/PROJ-1"
-    assert kwargs["params"] == {"fields": "summary,priority,status,timetracking"}
+    assert kwargs["params"] == {"fields": "summary,priority,status,timetracking,assignee"}
 
 
 @patch("et.jira.requests.get")
@@ -603,6 +657,35 @@ def test_fetch_issue_defaults_priority_to_empty_string(mock_get):
     issue = fetch_issue(_config(), "PROJ-1")
 
     assert issue.priority == ""
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_parses_assignee_account_id(mock_get):
+    mock_get.return_value = _json_response(
+        200,
+        {
+            "fields": {
+                "summary": "A summary",
+                "status": {"name": "To Do"},
+                "assignee": {"accountId": "account-123"},
+            }
+        },
+    )
+
+    issue = fetch_issue(_config(), "PROJ-1")
+
+    assert issue.assignee_account_id == "account-123"
+
+
+@patch("et.jira.requests.get")
+def test_fetch_issue_defaults_assignee_account_id_to_none_when_unassigned(mock_get):
+    mock_get.return_value = _json_response(
+        200, {"fields": {"summary": "A summary", "status": {"name": "To Do"}}}
+    )
+
+    issue = fetch_issue(_config(), "PROJ-1")
+
+    assert issue.assignee_account_id is None
 
 
 @patch("et.jira.requests.get")

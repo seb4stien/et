@@ -30,6 +30,7 @@ MYSELF_PATH = "rest/api/3/myself"
 COMPONENTS_PATH_TEMPLATE = "rest/api/3/project/{key}/components"
 FIELD_PATH = "rest/api/3/field"
 ISSUE_PATH = "rest/api/3/issue"
+ASSIGNEE_PATH_TEMPLATE = "rest/api/3/issue/{key}/assignee"
 BOARD_PATH = "rest/agile/1.0/board"
 BOARD_SPRINT_PATH_TEMPLATE = "rest/agile/1.0/board/{board_id}/sprint"
 AGILE_ISSUE_PATH_TEMPLATE = "rest/agile/1.0/issue/{key}"
@@ -62,6 +63,7 @@ class JiraIssue:
     priority: str
     status: str = ""
     original_estimate_seconds: int | None = None
+    assignee_account_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,7 @@ def text_to_adf(text: str) -> dict[str, object]:
 
 def _request(
     jira_config: JiraConfig,
-    method: Literal["GET", "POST"],
+    method: Literal["GET", "POST", "PUT"],
     url: str,
     *,
     expected_statuses: tuple[int, ...],
@@ -134,8 +136,15 @@ def _request(
                 auth=(jira_config.email, jira_config.pat),
                 timeout=30,
             )
-        else:
+        elif method == "POST":
             response = requests.post(
+                url,
+                json=json,
+                auth=(jira_config.email, jira_config.pat),
+                timeout=30,
+            )
+        else:
+            response = requests.put(
                 url,
                 json=json,
                 auth=(jira_config.email, jira_config.pat),
@@ -493,11 +502,20 @@ def _parse_original_estimate_seconds(fields: dict[str, object]) -> int | None:
     return value
 
 
+def _parse_assignee_account_id(fields: dict[str, object]) -> str | None:
+    """Return `fields.assignee.accountId`, or `None` if the issue is unassigned/malformed."""
+    assignee = fields.get("assignee")
+    if not isinstance(assignee, dict):
+        return None
+    account_id = assignee.get("accountId")
+    return account_id if isinstance(account_id, str) and account_id else None
+
+
 def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
     """Return `issue_key`'s summary, priority, status, and original estimate as a `JiraIssue`.
 
     Calls Jira's
-    `GET /rest/api/3/issue/{key}?fields=summary,priority,status,timetracking`
+    `GET /rest/api/3/issue/{key}?fields=summary,priority,status,timetracking,assignee`
     endpoint. Used by `et jira start KEY` to look up an issue given directly
     by key, rather than picked from `fetch_active_issues`'s candidate list.
     Raises `JiraError` if the request cannot be made, Jira rejects it, or
@@ -505,7 +523,7 @@ def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
     """
     url = _jira_url(jira_config, f"{ISSUE_PATH}/{issue_key}")
     payload = _get_json(
-        jira_config, url, params={"fields": "summary,priority,status,timetracking"}
+        jira_config, url, params={"fields": "summary,priority,status,timetracking,assignee"}
     )
     if not isinstance(payload, dict):
         raise JiraError(f"unexpected Jira API response from {url}: not a JSON object")
@@ -532,6 +550,7 @@ def fetch_issue(jira_config: JiraConfig, issue_key: str) -> JiraIssue:
         priority=priority if isinstance(priority, str) else "",
         status=status,
         original_estimate_seconds=_parse_original_estimate_seconds(fields),
+        assignee_account_id=_parse_assignee_account_id(fields),
     )
 
 
@@ -576,7 +595,7 @@ def _fetch_issue_pages(jira_config: JiraConfig, url: str) -> list[object]:
     while True:
         params: dict[str, str] = {
             "jql": jira_config.jql,
-            "fields": "summary,priority,status,timetracking",
+            "fields": "summary,priority,status,timetracking,assignee",
         }
         if next_page_token is not None:
             params["nextPageToken"] = next_page_token
@@ -679,6 +698,7 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
                 priority=priority if isinstance(priority, str) else "",
                 status=status if isinstance(status, str) else "",
                 original_estimate_seconds=_parse_original_estimate_seconds(fields),
+                assignee_account_id=_parse_assignee_account_id(fields),
             )
         )
 
@@ -696,6 +716,24 @@ def fetch_active_issues(jira_config: JiraConfig) -> list[JiraIssue]:
     indexed = list(enumerate(issues))
     indexed.sort(key=lambda pair: (rank.get(pair[1].priority, unranked), pair[0]))
     return [issue for _, issue in indexed]
+
+
+def assign_issue(jira_config: JiraConfig, issue_key: str, account_id: str) -> None:
+    """Assign `issue_key` to the Jira user identified by `account_id`.
+
+    Calls Jira's `PUT /rest/api/3/issue/{key}/assignee` endpoint (which
+    returns 204 No Content on success). Raises `JiraError` if the request
+    cannot be made or Jira rejects it.
+    """
+    url = _jira_url(jira_config, ASSIGNEE_PATH_TEMPLATE.format(key=issue_key))
+
+    _request(
+        jira_config,
+        "PUT",
+        url,
+        expected_statuses=(204,),
+        json={"accountId": account_id},
+    )
 
 
 def fetch_transitions(jira_config: JiraConfig, issue_key: str) -> list[JiraTransition]:

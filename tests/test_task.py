@@ -300,6 +300,7 @@ def _issue(
     priority: str = "High",
     status: str = "",
     original_estimate_seconds: int | None = None,
+    assignee_account_id: str | None = None,
 ) -> JiraIssue:
     return JiraIssue(
         key=key,
@@ -307,6 +308,7 @@ def _issue(
         priority=priority,
         status=status,
         original_estimate_seconds=original_estimate_seconds,
+        assignee_account_id=assignee_account_id,
     )
 
 
@@ -490,6 +492,95 @@ def test_create_task_from_jira_wraps_fetch_transitions_error(
         )
 
 
+@patch("et.task.assign_issue")
+@patch("et.task.search_user_account_id")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_active_issues")
+@patch("et.task.load_config")
+def test_create_task_from_jira_skips_confirm_assign_when_already_assigned_to_self(
+    mock_load_config,
+    mock_fetch,
+    _mock_create_task_workspace,
+    mock_search_user_account_id,
+    mock_assign_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch.return_value = [_issue("ISD-2", assignee_account_id="acct-1")]
+    mock_search_user_account_id.return_value = "acct-1"
+    confirm_assign = MagicMock()
+
+    create_task_from_jira(select_issue=lambda issues: issues[0], confirm_assign=confirm_assign)
+
+    confirm_assign.assert_not_called()
+    mock_assign_issue.assert_not_called()
+
+
+@patch("et.task.assign_issue")
+@patch("et.task.search_user_account_id", return_value=None)
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_active_issues")
+@patch("et.task.load_config")
+def test_create_task_from_jira_skips_confirm_assign_when_current_user_lookup_fails(
+    mock_load_config,
+    mock_fetch,
+    _mock_create_task_workspace,
+    _mock_search_user_account_id,
+    mock_assign_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch.return_value = [_issue("ISD-2")]
+    confirm_assign = MagicMock()
+
+    create_task_from_jira(select_issue=lambda issues: issues[0], confirm_assign=confirm_assign)
+
+    confirm_assign.assert_not_called()
+    mock_assign_issue.assert_not_called()
+
+
+@patch("et.task.assign_issue")
+@patch("et.task.search_user_account_id", return_value="acct-1")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_active_issues")
+@patch("et.task.load_config")
+def test_create_task_from_jira_assigns_issue_to_self_when_confirmed(
+    mock_load_config,
+    mock_fetch,
+    _mock_create_task_workspace,
+    _mock_search_user_account_id,
+    mock_assign_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch.return_value = [_issue("ISD-2", assignee_account_id="acct-2")]
+
+    create_task_from_jira(
+        select_issue=lambda issues: issues[0], confirm_assign=lambda issue: True
+    )
+
+    mock_assign_issue.assert_called_once_with(_config().jira, "ISD-2", "acct-1")
+
+
+@patch("et.task.assign_issue")
+@patch("et.task.search_user_account_id", return_value="acct-1")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_active_issues")
+@patch("et.task.load_config")
+def test_create_task_from_jira_skips_assign_when_declined(
+    mock_load_config,
+    mock_fetch,
+    _mock_create_task_workspace,
+    _mock_search_user_account_id,
+    mock_assign_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch.return_value = [_issue("ISD-2", assignee_account_id="acct-2")]
+
+    create_task_from_jira(
+        select_issue=lambda issues: issues[0], confirm_assign=lambda issue: False
+    )
+
+    mock_assign_issue.assert_not_called()
+
+
 # --- create_task_from_jira_key -----------------------------------------------
 
 
@@ -639,6 +730,75 @@ def test_create_task_from_jira_key_calls_ensure_issue_in_active_sprint_with_conf
     create_task_from_jira_key("ISD-2", select_sprint=select_sprint, warn=warn)
 
     mock_ensure_sprint.assert_called_once_with(config, config.jira, "ISD-2", select_sprint, warn)
+
+
+@patch("et.task.assign_issue")
+@patch("et.task.search_user_account_id")
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_skips_confirm_assign_when_already_assigned_to_self(
+    mock_load_config,
+    mock_fetch_issue,
+    _mock_create_task_workspace,
+    _mock_ensure_sprint,
+    mock_search_user_account_id,
+    mock_assign_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue("ISD-2", assignee_account_id="acct-1")
+    mock_search_user_account_id.return_value = "acct-1"
+    confirm_assign = MagicMock()
+
+    create_task_from_jira_key("ISD-2", confirm_assign=confirm_assign)
+
+    confirm_assign.assert_not_called()
+    mock_assign_issue.assert_not_called()
+
+
+@patch("et.task.assign_issue")
+@patch("et.task.search_user_account_id", return_value="acct-1")
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_assigns_issue_to_self_when_confirmed(
+    mock_load_config,
+    mock_fetch_issue,
+    _mock_create_task_workspace,
+    _mock_ensure_sprint,
+    _mock_search_user_account_id,
+    mock_assign_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue("ISD-2", assignee_account_id="acct-2")
+
+    create_task_from_jira_key("ISD-2", confirm_assign=lambda issue: True)
+
+    mock_assign_issue.assert_called_once_with(_config().jira, "ISD-2", "acct-1")
+
+
+@patch("et.task.assign_issue")
+@patch("et.task.search_user_account_id", return_value="acct-1")
+@patch("et.task.ensure_issue_in_active_sprint")
+@patch("et.task.create_task_workspace")
+@patch("et.task.fetch_issue")
+@patch("et.task.load_config")
+def test_create_task_from_jira_key_skips_assign_when_declined(
+    mock_load_config,
+    mock_fetch_issue,
+    _mock_create_task_workspace,
+    _mock_ensure_sprint,
+    _mock_search_user_account_id,
+    mock_assign_issue,
+):
+    mock_load_config.return_value = _config()
+    mock_fetch_issue.return_value = _issue("ISD-2", assignee_account_id="acct-2")
+
+    create_task_from_jira_key("ISD-2", confirm_assign=lambda issue: False)
+
+    mock_assign_issue.assert_not_called()
 
 
 # --- ensure_issue_in_active_sprint -------------------------------------------
