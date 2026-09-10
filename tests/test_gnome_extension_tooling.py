@@ -9,6 +9,8 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).parents[1]
 EXTENSION_DIR = REPO_ROOT / "gnome-extension" / "et@seb4stien.github.com"
 VALIDATOR = REPO_ROOT / "scripts" / "check-gnome-shell-extension.py"
@@ -121,3 +123,42 @@ def test_enable_extension_setting_handles_typed_empty_array(tmp_path: Path) -> N
     assert calls.read_text().strip() == (
         "set org.gnome.shell enabled-extensions ['et@example.com']"
     )
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_cleanup_retries_removal_failure(tmp_path: Path, persistent: bool) -> None:
+    test_root = tmp_path / "et-gnome-shell-test-cleanup"
+    (test_root / "runtime" / "doc").mkdir(parents=True)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "calls"
+    real_rm = shutil.which("rm")
+    assert real_rm is not None
+    fake_rm = fake_bin / "rm"
+    fake_rm.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo called >> "$CALLS_FILE"\n'
+        'if [ "$PERSISTENT" = true ] || [ "$(wc -l < "$CALLS_FILE")" -eq 1 ]; then\n'
+        '    echo "simulated portal teardown race" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        'exec "$REAL_RM" "$@"\n'
+    )
+    fake_rm.chmod(0o755)
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts/lib/remove-isolated-gnome-shell-env.sh"), str(test_root)],
+        env={
+            **os.environ,
+            "TMPDIR": str(tmp_path),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "CALLS_FILE": str(calls),
+            "REAL_RM": real_rm,
+            "PERSISTENT": str(persistent).lower(),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == (1 if persistent else 0), result.stderr
+    assert test_root.exists() is persistent
+    assert len(calls.read_text().splitlines()) == (3 if persistent else 2)
