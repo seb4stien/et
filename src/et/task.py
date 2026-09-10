@@ -8,7 +8,8 @@ more workspace when they're all taken), prepares its extension counter, and
 switches GNOME to it — moving the terminal window it's run from along with
 it — picking the slot's name/description/Jira link/original estimate from
 the user's active Jira issues (and offering to move the selected issue to
-"In Progress" if it isn't already). `et jira complete` logs the active
+"In Progress" if it isn't already, and to assign it to the current user if
+it isn't already). `et jira complete` logs the active
 workspace's tracked time to Jira (reusing
 `et.jira_time.log_time_for_current_workspace`), then — each behind its own
 confirmation prompt — optionally deletes that workspace (reclaiming its
@@ -46,6 +47,7 @@ from et.jira import (
     JiraIssue,
     JiraSprint,
     add_issue_to_sprint,
+    assign_issue,
     create_comment,
     discover_board_id,
     fetch_active_issues,
@@ -54,6 +56,7 @@ from et.jira import (
     fetch_issue_sprint,
     fetch_issue_status,
     fetch_transitions,
+    search_user_account_id,
     transition_issue,
 )
 from et.jira_ref import JIRA_REF_PREFIX, default_entry, jira_key_from_ref, truncate_summary
@@ -458,9 +461,38 @@ def _maybe_transition_to_in_progress(
         _transition_to_status(jira_config, issue.key, IN_PROGRESS_STATUS, display="In Progress")
 
 
+def _maybe_assign_to_self(
+    jira_config: JiraConfig,
+    issue: JiraIssue,
+    confirm_assign: Callable[[JiraIssue], bool] | None,
+) -> None:
+    """Assign `issue` to the current Jira user if not already, and `confirm_assign` agrees.
+
+    Shared by `create_task_from_jira` (interactive picker) and
+    `create_task_from_jira_key` (positional `KEY`): both offer the same
+    "not already assigned to you? assign it" step, right after the
+    In-Progress transition step and before the workspace is created.
+
+    Looks up the current user's accountId via `search_user_account_id`
+    (using `jira_config.email`). If that lookup fails to find a matching
+    user, or the issue is already assigned to that accountId, the prompt is
+    skipped entirely without calling `confirm_assign`.
+    """
+    if confirm_assign is None:
+        return
+
+    account_id = search_user_account_id(jira_config, jira_config.email)
+    if account_id is None or issue.assignee_account_id == account_id:
+        return
+
+    if confirm_assign(issue):
+        assign_issue(jira_config, issue.key, account_id)
+
+
 def create_task_from_jira(
     select_issue: Callable[[list[JiraIssue]], JiraIssue | None],
     confirm_transition: Callable[[JiraIssue], bool] | None = None,
+    confirm_assign: Callable[[JiraIssue], bool] | None = None,
     confirm_grow: Callable[[int], bool] = lambda count: False,
 ) -> TaskCreateResult | None:
     """Create a task workspace from one of the user's active Jira issues.
@@ -475,6 +507,11 @@ def create_task_from_jira(
     is given, calls `confirm_transition(issue)` — if it returns `True`, the
     issue is moved to its "In Progress" transition before the workspace is
     created.
+
+    Right after that, if the issue isn't already assigned to the current
+    Jira user and `confirm_assign` is given, calls `confirm_assign(issue)`
+    — if it returns `True`, the issue is assigned to the current user
+    before the workspace is created.
 
     `confirm_grow(count)` is forwarded to `create_task_workspace`: it's
     called only when all `count` workspaces are taken, to ask whether to add
@@ -508,6 +545,7 @@ def create_task_from_jira(
         return None
 
     _maybe_transition_to_in_progress(config.jira, issue, confirm_transition)
+    _maybe_assign_to_self(config.jira, issue, confirm_assign)
 
     return create_task_workspace(
         name=truncate_summary(issue.summary),
@@ -590,6 +628,7 @@ def ensure_issue_in_active_sprint(
 def create_task_from_jira_key(
     issue_key: str,
     confirm_transition: Callable[[JiraIssue], bool] | None = None,
+    confirm_assign: Callable[[JiraIssue], bool] | None = None,
     select_sprint: Callable[[list[JiraSprint]], JiraSprint | None] = (
         lambda sprints: sprints[0] if sprints else None
     ),
@@ -600,14 +639,15 @@ def create_task_from_jira_key(
 
     Follows the same steps as `create_task_from_jira`'s interactive flow —
     offering to move the issue to "In Progress" via `confirm_transition` if
-    it isn't already, then creating the workspace/timer and switching to
-    it via `create_task_workspace` — but for a specific `issue_key` instead
-    of one picked from the active-issues list. Additionally ensures the
-    issue is in one of its project's current active sprints via
-    `ensure_issue_in_active_sprint`, letting `select_sprint` pick among
-    them (or decline) if it isn't already in one (any board/sprint
-    resolution problem is reported via `warn` and skipped rather than
-    failing the command).
+    it isn't already, then offering to assign it to the current user via
+    `confirm_assign` if it isn't already, then creating the workspace/timer
+    and switching to it via `create_task_workspace` — but for a specific
+    `issue_key` instead of one picked from the active-issues list.
+    Additionally ensures the issue is in one of its project's current
+    active sprints via `ensure_issue_in_active_sprint`, letting
+    `select_sprint` pick among them (or decline) if it isn't already in one
+    (any board/sprint resolution problem is reported via `warn` and skipped
+    rather than failing the command).
 
     Raises `ConfigError` if the config file is missing/malformed,
     `TaskError` if there's no `jira` config block or `issue_key` is already
@@ -633,6 +673,7 @@ def create_task_from_jira_key(
         raise TaskError(str(exc)) from exc
 
     _maybe_transition_to_in_progress(config.jira, issue, confirm_transition)
+    _maybe_assign_to_self(config.jira, issue, confirm_assign)
 
     ensure_issue_in_active_sprint(config, config.jira, issue_key, select_sprint, warn)
 

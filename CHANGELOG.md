@@ -5,6 +5,12 @@ All notable changes to `et` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+- `et jira start`: now offers to assign the issue to yourself (defaulting
+  to yes) right after the existing "move to In Progress?" prompt, unless
+  it's already assigned to you. Applies to both the interactive picker and
+  the direct `et jira start KEY` form.
+
 ## [1.0.0] - 2026-09-08
 
 Built from `main`, including `feat/native-wayland` (PR #9).

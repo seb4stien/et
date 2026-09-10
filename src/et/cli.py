@@ -640,11 +640,12 @@ def jira_start(
     Lists your active Jira issues that aren't already linked to a
     workspace and lets you pick one (its summary becomes the workspace
     name/description and its key is linked). If the selected issue isn't
-    already "In Progress", offers to move it there. When every workspace is
-    already taken, `et jira start` asks whether to add one more (bumping
-    GNOME's workspace count by one). The terminal window `et jira start`
-    was run from is moved along to the new workspace, so it doesn't get
-    left behind.
+    already "In Progress", offers to move it there. If it isn't already
+    assigned to you, offers to assign it to yourself too. When every
+    workspace is already taken, `et jira start` asks whether to add one
+    more (bumping GNOME's workspace count by one). The terminal window
+    `et jira start` was run from is moved along to the new workspace, so
+    it doesn't get left behind.
 
     With KEY given, skips the picker and starts that specific issue
     directly (failing if it's already linked to a workspace). It follows
@@ -665,6 +666,12 @@ def jira_start(
         return typer.confirm(
             f"{_key_display(issue.key)} is currently '{status_display}'. "
             "Move it to 'In Progress'?",
+            default=True,
+        )
+
+    def confirm_assign(issue: JiraIssue) -> bool:
+        return typer.confirm(
+            f"Assign {_key_display(issue.key)} to yourself?",
             default=True,
         )
 
@@ -697,7 +704,12 @@ def jira_start(
 
         try:
             key_result = create_task_from_jira_key(
-                key, confirm_transition, select_sprint, confirm_grow, warn
+                key,
+                confirm_transition,
+                confirm_assign,
+                select_sprint,
+                confirm_grow,
+                warn,
             )
         except (ConfigError, TaskError) as error:
             typer.echo(f"Error: {error}", err=True)
@@ -729,7 +741,9 @@ def jira_start(
         return issues[selected - 1]
 
     try:
-        result = create_task_from_jira(select_issue, confirm_transition, confirm_grow)
+        result = create_task_from_jira(
+            select_issue, confirm_transition, confirm_assign, confirm_grow
+        )
     except (ConfigError, TaskError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from error
