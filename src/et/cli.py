@@ -1046,10 +1046,13 @@ def jira_complete(
     jira log-time`), tells you how much was logged, then asks whether to
     delete the workspace (reclaiming its GNOME workspace slot) and whether
     to move the linked Jira issue to "Done". Both actions are skipped unless
-    confirmed.
+    confirmed. Time below 60 seconds is skipped without creating a worklog.
     """
 
     def on_logged(result: LogTimeResult) -> None:
+        if result.seconds_logged == 0:
+            typer.echo("Skipped time logging: less than 60 seconds elapsed.")
+            return
         duration = format_duration(result.seconds_logged)
         typer.echo(
             f"Logged {duration} to {_jira_ref_link(result.issue_key)} "

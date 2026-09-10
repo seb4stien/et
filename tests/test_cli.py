@@ -1749,3 +1749,44 @@ def test_edit_branch_description_returns_stripped_input():
 
     with patch("et.cli.typer.prompt", return_value="  custom slug  "):
         assert _edit_branch_description("default-slug") == "custom slug"
+
+
+@pytest.mark.parametrize("seconds", [None, 0, 25, 59, 60])
+@pytest.mark.parametrize("confirm", [False, True])
+def test_jira_complete_with_short_counter(seconds, confirm):
+    config = EtConfig(
+        jira=JiraConfig(
+            base_url="https://example.atlassian.net", email="me@example.com", pat="token",
+            jql="assignee = currentUser()",
+        ),
+        workspaces=[WorkspaceConfigEntry(name="Task", ref="jira:ISD-321")],
+    )
+    with (
+        patch("et.jira_time.load_config", return_value=config),
+        patch("et.task.load_config", return_value=config),
+        patch("et.jira_time.workspaces.get_active_workspace_index", return_value=0),
+        patch("et.jira_time.et_extension.get_workspace_counter",
+              return_value=WorkspaceCounter(elapsed_seconds=seconds or 0, running=True),
+              side_effect=WorkspaceCounterNotFoundError("not prepared")
+              if seconds is None else None),
+        patch("et.jira_time.create_worklog") as worklog,
+        patch("et.jira_time.et_extension.reset_workspace_counter") as reset,
+        patch("et.task._free_workspace_slot") as delete,
+        patch("et.task._transition_to_status") as transition,
+    ):
+        answer = "y\n" if confirm else "n\n"
+        result = runner.invoke(app, ["jira", "complete"], input=answer * 2)
+
+    assert result.exit_code == 0, result.output
+    assert "Delete workspace 1?" in result.output
+    assert "to 'Done'?" in result.output
+    assert delete.called is confirm
+    assert transition.called is confirm
+    if seconds is None or seconds < 60:
+        assert "Skipped time logging: less than 60 seconds elapsed." in result.output
+        assert "Logged " not in result.output
+        worklog.assert_not_called()
+        reset.assert_not_called()
+    else:
+        worklog.assert_called_once_with(config.jira, "ISD-321", 60, comment=None)
+        reset.assert_called_once_with(0)

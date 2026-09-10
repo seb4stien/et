@@ -779,7 +779,9 @@ def complete_task_for_current_workspace(
     Delegates the logging step to
     `et.jira_time.log_time_for_current_workspace` (which already resets the
     counter on success) and, once it succeeds, calls `on_logged(log_result)`
-    so the caller can report the logged time before any prompts. Logs
+    so the caller can report the logged time before any prompts. Time below
+    the logging minimum is skipped, allowing completion with no elapsed time.
+    The counter is left untouched unless workspace deletion is confirmed. Logs
     against `issue_key` if given (e.g. via `-j/--jira`), instead of the
     issue linked to the active workspace — workspace deletion still applies
     to the active workspace regardless, since it's not tied to which issue
@@ -807,7 +809,7 @@ def complete_task_for_current_workspace(
     `TaskError` if freeing the workspace or transitioning the issue fails.
     """
     log_result = log_time_for_current_workspace(
-        description=comment, reset=True, issue_key=issue_key
+        description=comment, reset=True, issue_key=issue_key, skip_short=True
     )
     on_logged(log_result)
 

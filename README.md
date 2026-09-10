@@ -11,7 +11,8 @@ can link workspaces to Jira issues to log time against them.
   - `create`: wrapper to create Jira issue from the command line (can take GitHub PR as input)
   - `start`: let you select and assigned task, create a workspace associated to it, and track the time you spend on it (prompts to move it to "In Progress" and to assign it to yourself if it isn't already).
   - `log-time`: log your current progress (typically to do it on a daily-basis)
-  - `complete`: log the time spent, and move the issue to Done.
+  - `complete`: log the time spent, and move the issue to Done. If less than 60 seconds
+    have elapsed, skip logging and continue with the completion prompts.
   - `comment`: add a comment to the ticket.
   - `status`: show and let you update the status.
 - **`et`** (no subcommand) / **`et info`**: show the Jira issue linked to the workspace (if any).
