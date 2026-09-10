@@ -847,7 +847,9 @@ def test_complete_task_deletes_workspace_after_logging(
         comment="done", confirm_delete=lambda _result: True
     )
 
-    mock_log_time.assert_called_once_with(description="done", reset=True, issue_key=None)
+    mock_log_time.assert_called_once_with(
+        description="done", reset=True, issue_key=None, skip_short=True
+    )
     assert result.log_result.issue_key == "ISD-2"
     assert result.workspace_freed is True
     # The completed workspace is reclaimed exactly like `et ws delete` — force
@@ -867,7 +869,9 @@ def test_complete_task_forwards_issue_key_override(mock_log_time, mock_load_conf
 
     result = complete_task_for_current_workspace(comment="done", issue_key="ISD-999")
 
-    mock_log_time.assert_called_once_with(description="done", reset=True, issue_key="ISD-999")
+    mock_log_time.assert_called_once_with(
+        description="done", reset=True, issue_key="ISD-999", skip_short=True
+    )
     assert result.log_result.issue_key == "ISD-999"
 
 

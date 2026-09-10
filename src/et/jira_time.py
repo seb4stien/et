@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from et import et_extension, workspaces
 from et.config import EtConfig, JiraConfig, load_config
-from et.et_extension import EtExtensionError
+from et.et_extension import EtExtensionError, WorkspaceCounterNotFoundError
 from et.jira import JiraError, create_worklog, fetch_issue
 from et.jira_ref import jira_key_from_ref
 
@@ -134,7 +134,11 @@ def resolve_active_issue(
 
 
 def log_time_for_current_workspace(
-    *, description: str | None = None, reset: bool = True, issue_key: str | None = None
+    *,
+    description: str | None = None,
+    reset: bool = True,
+    issue_key: str | None = None,
+    skip_short: bool = False,
 ) -> LogTimeResult:
     """Log the active workspace's extension counter elapsed time to its Jira issue.
 
@@ -150,6 +154,11 @@ def log_time_for_current_workspace(
     installed/enabled), its elapsed time is under `MIN_LOGGABLE_SECONDS`,
     or the Jira API call fails.
 
+    With `skip_short=True`, time below the minimum returns zero seconds
+    logged without creating a worklog or resetting the counter. A missing
+    workspace counter is treated as zero elapsed time in this mode, allowing
+    task completion even when there is no time to log.
+
     On success, resets the counter to 0 (unless `reset=False`) so the same
     elapsed time isn't accidentally logged again later. The reset only
     happens after the Jira worklog call has actually succeeded. If Jira
@@ -162,11 +171,22 @@ def log_time_for_current_workspace(
 
     try:
         counter = et_extension.get_workspace_counter(index)
+    except WorkspaceCounterNotFoundError as exc:
+        if not skip_short:
+            raise JiraLogTimeError(str(exc)) from exc
+        counter = None
     except EtExtensionError as exc:
         raise JiraLogTimeError(str(exc)) from exc
 
-    seconds = counter.elapsed_seconds
+    seconds = counter.elapsed_seconds if counter is not None else 0
     if seconds < MIN_LOGGABLE_SECONDS:
+        if skip_short:
+            return LogTimeResult(
+                workspace_index=index,
+                issue_key=resolved_key,
+                seconds_logged=0,
+                counter_reset=False,
+            )
         raise JiraLogTimeError(
             f"workspace {index + 1}'s counter has only {seconds}s elapsed "
             f"(minimum {MIN_LOGGABLE_SECONDS}s to log)"
